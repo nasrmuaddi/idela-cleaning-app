@@ -167,6 +167,9 @@ def create_by_question(clean_base: pd.DataFrame, actions: Dict[str, str]) -> pd.
     baseline_cols = find_range_columns(clean_base, BASELINE_START, BASELINE_END)
     out = clean_base[[c for c in META_COLUMNS if c in clean_base.columns]].copy()
 
+    used_baseline_score_cols = []
+    used_endline_score_cols = []
+
     for base_col in baseline_cols:
         if actions.get(base_col, "No action") == "drop this question":
             continue
@@ -187,8 +190,23 @@ def create_by_question(clean_base: pd.DataFrame, actions: Dict[str, str]) -> pd.
             - pd.to_numeric(clean_base[base_col], errors="coerce")
         )
 
-    return out
+        used_baseline_score_cols.append(base_col)
+        used_endline_score_cols.append(post_col)
 
+    # Total IDELA score columns across all remaining questions.
+    if used_baseline_score_cols:
+        out["baseline idela score"] = clean_base[used_baseline_score_cols].apply(pd.to_numeric, errors="coerce").sum(axis=1)
+    else:
+        out["baseline idela score"] = 0
+
+    if used_endline_score_cols:
+        out["endline idela score"] = clean_base[used_endline_score_cols].apply(pd.to_numeric, errors="coerce").sum(axis=1)
+    else:
+        out["endline idela score"] = 0
+
+    out["idela score"] = out["endline idela score"] - out["baseline idela score"]
+
+    return out
 
 def to_excel_bytes(sheets: Dict[str, pd.DataFrame]) -> bytes:
     output = io.BytesIO()
@@ -440,22 +458,10 @@ if uploaded_file:
     remaining_missing_summary = get_remaining_missing_summary(clean_df, remaining_question_cols)
 
     if len(remaining_missing_summary) > 0:
+        missing_columns = sorted(remaining_missing_summary["Question ID"].tolist())
         st.error(
-            "Download is blocked because some question values are still missing. "
-            "Please go back to Step 3 and choose an action for every question that still has 999, ---, blank, or null values."
-        )
-        st.dataframe(
-            remaining_missing_summary.sort_values(["Missing count", "Question ID"], ascending=[False, True]),
-            use_container_width=True,
-            hide_index=True,
-            column_config={
-                "Missing %": st.column_config.ProgressColumn(
-                    "Missing %",
-                    format="%.1f%%",
-                    min_value=0,
-                    max_value=1
-                )
-            }
+            "Download is blocked. Missing is still in these columns:\n\n"
+            + "\n".join(missing_columns)
         )
     else:
         sheets = {
