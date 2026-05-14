@@ -112,16 +112,40 @@ def normalize_score_values(df: pd.DataFrame, question_cols: List[str]) -> pd.Dat
     return out
 
 
+def is_missing_question_value(series: pd.Series) -> pd.Series:
+    """Treat 999, --- and blank/null as missing question values."""
+    as_text = series.astype("string").str.strip()
+    numeric = pd.to_numeric(series, errors="coerce")
+    return series.isna() | as_text.isin(["---", "", "999"]) | numeric.eq(999)
+
+
 def missing_pct(df: pd.DataFrame, cols: List[str]) -> pd.Series:
     if not cols:
         return pd.Series([0.0] * len(df), index=df.index)
-    return df[cols].isin([999]).sum(axis=1) / len(cols)
+    missing_flags = pd.concat([is_missing_question_value(df[col]) for col in cols], axis=1)
+    return missing_flags.sum(axis=1) / len(cols)
 
 
 def question_missing_pct(df: pd.DataFrame, col: str) -> float:
     if col not in df.columns or len(df) == 0:
         return 0.0
-    return float(df[col].isin([999]).sum() / len(df))
+    return float(is_missing_question_value(df[col]).sum() / len(df))
+
+
+def get_remaining_missing_summary(df: pd.DataFrame, question_cols: List[str]) -> pd.DataFrame:
+    """Return question columns that still have 999/---/blank/null values."""
+    rows = []
+    for col in question_cols:
+        if col not in df.columns:
+            continue
+        missing_count = int(is_missing_question_value(df[col]).sum())
+        if missing_count > 0:
+            rows.append({
+                "Question ID": col,
+                "Missing count": missing_count,
+                "Missing %": missing_count / len(df) if len(df) else 0
+            })
+    return pd.DataFrame(rows)
 
 
 def apply_actions(df: pd.DataFrame, actions: Dict[str, str]) -> pd.DataFrame:
@@ -412,23 +436,46 @@ if uploaded_file:
     st.subheader("4) Clean Data Preview")
     st.dataframe(clean_df.head(20), use_container_width=True)
 
-    sheets = {
-        "filtered on Idela": filtered_df,
-        "idela clean data set": clean_df,
-        "BY QUESTION": by_question_df,
-        "BY ITEM": pd.DataFrame(),
-        "BY DOMAIN": pd.DataFrame(),
-        "IDELA ANALYSIS": pd.DataFrame()
-    }
+    remaining_question_cols = [c for c in (baseline_cols + endline_cols) if c in clean_df.columns]
+    remaining_missing_summary = get_remaining_missing_summary(clean_df, remaining_question_cols)
 
-    excel_bytes = to_excel_bytes(sheets)
+    if len(remaining_missing_summary) > 0:
+        st.error(
+            "Download is blocked because some question values are still missing. "
+            "Please go back to Step 3 and choose an action for every question that still has 999, ---, blank, or null values."
+        )
+        st.dataframe(
+            remaining_missing_summary.sort_values(["Missing count", "Question ID"], ascending=[False, True]),
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Missing %": st.column_config.ProgressColumn(
+                    "Missing %",
+                    format="%.1f%%",
+                    min_value=0,
+                    max_value=1
+                )
+            }
+        )
+    else:
+        sheets = {
+            "filtered on Idela": filtered_df,
+            "idela clean data set": clean_df,
+            "BY QUESTION": by_question_df,
+            "BY ITEM": pd.DataFrame(),
+            "BY DOMAIN": pd.DataFrame(),
+            "IDELA ANALYSIS": pd.DataFrame()
+        }
 
-    st.download_button(
-        label="Download cleaned IDELA workbook",
-        data=excel_bytes,
-        file_name="idela_cleaned_output.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    )
+        excel_bytes = to_excel_bytes(sheets)
+
+        st.success("No 999, ---, blank, or null values remain in the question columns. You can download the cleaned workbook.")
+        st.download_button(
+            label="Download cleaned IDELA workbook",
+            data=excel_bytes,
+            file_name="idela_cleaned_output.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
 
 else:
     st.info("Upload your Excel file to start.")
