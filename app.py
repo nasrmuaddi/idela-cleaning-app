@@ -163,44 +163,51 @@ def apply_actions(df: pd.DataFrame, actions: Dict[str, str]) -> pd.DataFrame:
     return out
 
 
-def create_by_question(clean_base: pd.DataFrame, actions: Dict[str, str]) -> pd.DataFrame:
-    baseline_cols = find_range_columns(clean_base, BASELINE_START, BASELINE_END)
-    out = clean_base[[c for c in META_COLUMNS if c in clean_base.columns]].copy()
+def create_by_question(clean_df: pd.DataFrame, baseline_cols: List[str]) -> pd.DataFrame:
+    """
+    Create the BY QUESTION sheet.
+
+    baseline idela score = row sum from i1a_name_mark to i21_steps
+    endline idela score = row sum from i1a_name_mark_post to i21_steps_post
+    idela score = endline idela score - baseline idela score
+
+    The score uses only question columns that still exist after Step 3 actions.
+    """
+    out = clean_df[[c for c in META_COLUMNS if c in clean_df.columns]].copy()
 
     used_baseline_score_cols = []
     used_endline_score_cols = []
 
     for base_col in baseline_cols:
-        if actions.get(base_col, "No action") == "drop this question":
-            continue
-
         post_col = f"{base_col}_post"
-        if post_col not in clean_base.columns:
+
+        if base_col not in clean_df.columns or post_col not in clean_df.columns:
             continue
 
-        out[base_col] = clean_base[base_col]
-        out[post_col] = clean_base[post_col]
+        base_numeric = pd.to_numeric(clean_df[base_col], errors="coerce")
+        post_numeric = pd.to_numeric(clean_df[post_col], errors="coerce")
+
+        out[base_col] = base_numeric
+        out[post_col] = post_numeric
 
         comp_col = base_col.replace("_mark", "_mark_comparison")
         if comp_col == base_col:
             comp_col = f"{base_col}_comparison"
 
-        out[comp_col] = (
-            pd.to_numeric(clean_base[post_col], errors="coerce")
-            - pd.to_numeric(clean_base[base_col], errors="coerce")
-        )
+        out[comp_col] = post_numeric - base_numeric
 
         used_baseline_score_cols.append(base_col)
         used_endline_score_cols.append(post_col)
 
-    # Total IDELA score columns across all remaining questions.
     if used_baseline_score_cols:
-        out["baseline idela score"] = clean_base[used_baseline_score_cols].apply(pd.to_numeric, errors="coerce").sum(axis=1)
+        baseline_score_df = clean_df[used_baseline_score_cols].apply(pd.to_numeric, errors="coerce")
+        out["baseline idela score"] = baseline_score_df.sum(axis=1)
     else:
         out["baseline idela score"] = 0
 
     if used_endline_score_cols:
-        out["endline idela score"] = clean_base[used_endline_score_cols].apply(pd.to_numeric, errors="coerce").sum(axis=1)
+        endline_score_df = clean_df[used_endline_score_cols].apply(pd.to_numeric, errors="coerce")
+        out["endline idela score"] = endline_score_df.sum(axis=1)
     else:
         out["endline idela score"] = 0
 
@@ -449,7 +456,7 @@ if uploaded_file:
         st.info("If you choose 'drop this question', both the baseline question and its matching post/endline question are removed.")
 
     clean_df = apply_actions(clean_base, actions)
-    by_question_df = create_by_question(clean_base, actions)
+    by_question_df = create_by_question(clean_df, baseline_cols)
 
     st.subheader("4) Clean Data Preview")
     st.dataframe(clean_df.head(20), use_container_width=True)
