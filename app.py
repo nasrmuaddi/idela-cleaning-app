@@ -286,11 +286,21 @@ def selectbox_mapping(label: str, req_col: str, uploaded_cols: List[str], key: s
     mapping[key] = st.selectbox(label, options=options, index=index, key=f"map_{key}")
 
 
+def standard_output_columns() -> List[str]:
+    return META_COLUMNS + BASELINE_QUESTION_COLS + ENDLINE_QUESTION_COLS
+
+
+def keep_standard_columns(df: pd.DataFrame) -> pd.DataFrame:
+    keep_cols = [c for c in standard_output_columns() if c in df.columns]
+    return df[keep_cols].copy()
+
+
 def build_same_row_df(raw_df: pd.DataFrame, mapping: Dict[str, str]) -> pd.DataFrame:
+    # Rename mapped uploaded columns into the standard format, then discard all other columns.
     rename = {uploaded: standard for standard, uploaded in mapping.items() if uploaded}
     out = raw_df.rename(columns=rename).copy()
     out = out.loc[:, ~out.columns.duplicated()].copy()
-    return out
+    return keep_standard_columns(out)
 
 
 def build_two_file_df(base_df: pd.DataFrame, end_df: pd.DataFrame, mapping: Dict[str, str]) -> pd.DataFrame:
@@ -309,7 +319,8 @@ def build_two_file_df(base_df: pd.DataFrame, end_df: pd.DataFrame, mapping: Dict
     base_part = base_part.drop_duplicates(subset=["caseid"], keep="first")
     end_part = end_part.drop_duplicates(subset=["caseid"], keep="first")
 
-    return base_part.merge(end_part, on="caseid", how="inner")
+    merged = base_part.merge(end_part, on="caseid", how="inner")
+    return keep_standard_columns(merged)
 
 
 def build_duplicated_rows_df(raw_df: pd.DataFrame, mapping: Dict[str, str], baseline_value, endline_value) -> pd.DataFrame:
@@ -334,7 +345,8 @@ def build_duplicated_rows_df(raw_df: pd.DataFrame, mapping: Dict[str, str], base
 
     baseline_part = baseline_part.drop_duplicates(subset=["caseid"], keep="first")
     endline_part = endline_part.drop_duplicates(subset=["caseid"], keep="first")
-    return baseline_part.merge(endline_part, on="caseid", how="inner")
+    merged = baseline_part.merge(endline_part, on="caseid", how="inner")
+    return keep_standard_columns(merged)
 
 
 init_state()
@@ -349,7 +361,7 @@ if st.session_state.step == 1:
         [
             "One file: baseline and endline are in the same row",
             "Two files: one baseline file and one endline file",
-            "One file: baseline and endline are duplicated rows for one client",
+            "One file: baseline and endline are duplicated rows",
         ],
         index=0,
         key="upload_type_radio",
@@ -417,10 +429,13 @@ elif st.session_state.step == 2:
         raw_df = st.session_state.raw_df
         uploaded_cols = list(raw_df.columns)
         st.write("Map the uploaded columns into the standard IDELA format.")
-        tab_q, tab_meta, tab_preview = st.tabs(["Required question columns", "Optional info columns", "Preview"])
+        tab_meta, tab_q, tab_preview = st.tabs(["Essential info columns", "Required question columns", "Preview"])
+        with tab_meta:
+            st.warning("Map these essential info columns. Any other uploaded columns will be discarded.")
+            for col in META_COLUMNS:
+                selectbox_mapping(col, col, uploaded_cols, col, mapping)
         with tab_q:
-            st.warning("Map IDELA_date, all baseline question columns, and all endline/post question columns.")
-            selectbox_mapping("IDELA_date", "IDELA_date", uploaded_cols, "IDELA_date", mapping)
+            st.warning("Map all baseline question columns and all endline/post question columns.")
             for base_col in BASELINE_QUESTION_COLS:
                 c1, c2 = st.columns(2)
                 with c1:
@@ -428,13 +443,10 @@ elif st.session_state.step == 2:
                 with c2:
                     post_col = f"{base_col}_post"
                     selectbox_mapping(post_col, post_col, uploaded_cols, post_col, mapping, endline_hint=True)
-        with tab_meta:
-            for col in [c for c in META_COLUMNS if c != "IDELA_date"]:
-                selectbox_mapping(col, col, uploaded_cols, col, mapping)
         with tab_preview:
             st.dataframe(raw_df.head(20), use_container_width=True)
 
-        required_keys = ["IDELA_date"] + BASELINE_QUESTION_COLS + ENDLINE_QUESTION_COLS
+        required_keys = META_COLUMNS + BASELINE_QUESTION_COLS + ENDLINE_QUESTION_COLS
 
         if st.button("Next: Review rows", type="primary"):
             missing = [k for k in required_keys if not mapping.get(k)]
@@ -456,22 +468,23 @@ elif st.session_state.step == 2:
         base_cols = list(base_df.columns)
         end_cols = list(end_df.columns)
         st.write("Map baseline columns from the baseline file, and endline columns from the endline file.")
-        tab_ids, tab_base, tab_end, tab_meta = st.tabs(["ID columns", "Baseline questions", "Endline questions", "Optional baseline info"])
+        tab_ids, tab_meta, tab_base, tab_end = st.tabs(["ID columns", "Essential baseline info", "Baseline questions", "Endline questions"])
         with tab_ids:
             selectbox_mapping("Baseline unique child/beneficiary ID", "caseid", base_cols, "base_id", mapping)
             selectbox_mapping("Endline unique child/beneficiary ID", "caseid", end_cols, "end_id", mapping)
-        with tab_base:
+        with tab_meta:
+            st.warning("Map these essential info columns from the baseline file. Any other uploaded columns will be discarded.")
             selectbox_mapping("Baseline IDELA_date", "IDELA_date", base_cols, "base_IDELA_date", mapping)
+            for col in [c for c in META_COLUMNS if c not in ["caseid", "IDELA_date"]]:
+                selectbox_mapping(col, col, base_cols, f"base_{col}", mapping)
+        with tab_base:
             for base_col in BASELINE_QUESTION_COLS:
                 selectbox_mapping(base_col, base_col, base_cols, f"base_{base_col}", mapping)
         with tab_end:
             for base_col in BASELINE_QUESTION_COLS:
                 selectbox_mapping(f"{base_col} / endline", base_col, end_cols, f"end_{base_col}", mapping, endline_hint=True)
-        with tab_meta:
-            for col in [c for c in META_COLUMNS if c not in ["caseid", "IDELA_date"]]:
-                selectbox_mapping(col, col, base_cols, f"base_{col}", mapping)
 
-        required_keys = ["base_id", "end_id", "base_IDELA_date"] + [f"base_{c}" for c in BASELINE_QUESTION_COLS] + [f"end_{c}" for c in BASELINE_QUESTION_COLS]
+        required_keys = ["base_id", "end_id", "base_IDELA_date"] + [f"base_{c}" for c in META_COLUMNS if c not in ["caseid", "IDELA_date"]] + [f"base_{c}" for c in BASELINE_QUESTION_COLS] + [f"end_{c}" for c in BASELINE_QUESTION_COLS]
         if st.button("Next: Review rows", type="primary"):
             missing = [k for k in required_keys if not mapping.get(k)]
             base_selected = [mapping.get(k, "") for k in required_keys if k.startswith("base_") and mapping.get(k)] + ([mapping.get("base_id")] if mapping.get("base_id") else [])
@@ -492,7 +505,7 @@ elif st.session_state.step == 2:
         raw_df = st.session_state.raw_df
         uploaded_cols = list(raw_df.columns)
         st.write("Map the ID column, round column, then select which round value means baseline and endline.")
-        tab_setup, tab_q, tab_meta, tab_preview = st.tabs(["ID and round", "Question columns", "Optional info columns", "Preview"])
+        tab_setup, tab_meta, tab_q, tab_preview = st.tabs(["ID and round", "Essential info columns", "Question columns", "Preview"])
         with tab_setup:
             selectbox_mapping("Unique child/beneficiary ID", "caseid", uploaded_cols, "dup_id", mapping)
             selectbox_mapping("Round/status column that says baseline/endline", "round", uploaded_cols, "round_col", mapping)
@@ -508,13 +521,14 @@ elif st.session_state.step == 2:
             for base_col in BASELINE_QUESTION_COLS:
                 selectbox_mapping(base_col, base_col, uploaded_cols, f"q_{base_col}", mapping)
         with tab_meta:
+            st.warning("Map these essential info columns. Any other uploaded columns will be discarded.")
             selectbox_mapping("IDELA_date", "IDELA_date", uploaded_cols, "meta_IDELA_date", mapping)
             for col in [c for c in META_COLUMNS if c not in ["caseid", "IDELA_date"]]:
                 selectbox_mapping(col, col, uploaded_cols, f"meta_{col}", mapping)
         with tab_preview:
             st.dataframe(raw_df.head(20), use_container_width=True)
 
-        required_keys = ["dup_id", "round_col", "meta_IDELA_date"] + [f"q_{c}" for c in BASELINE_QUESTION_COLS]
+        required_keys = ["dup_id", "round_col", "meta_IDELA_date"] + [f"meta_{c}" for c in META_COLUMNS if c not in ["caseid", "IDELA_date"]] + [f"q_{c}" for c in BASELINE_QUESTION_COLS]
         if st.button("Next: Review rows", type="primary"):
             missing = [k for k in required_keys if not mapping.get(k)]
             selected = [mapping.get(k, "") for k in required_keys if mapping.get(k)]
