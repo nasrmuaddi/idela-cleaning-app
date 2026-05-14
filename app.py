@@ -106,6 +106,8 @@ def init_state():
         "mapped_df": None,
         "filtered_df": None,
         "clean_base": None,
+        "scored_df": None,
+        "value_recode_mapping": {},
         "actions": {},
         "selected_delete_indices": set(),
     }
@@ -119,6 +121,8 @@ def reset_after_upload_type_change():
     st.session_state.mapped_df = None
     st.session_state.filtered_df = None
     st.session_state.clean_base = None
+    st.session_state.scored_df = None
+    st.session_state.value_recode_mapping = {}
     st.session_state.actions = {}
     st.session_state.selected_delete_indices = set()
 
@@ -175,6 +179,66 @@ def normalize_score_values(df: pd.DataFrame, question_cols: List[str]) -> pd.Dat
         if col in out.columns:
             out[col] = out[col].replace({"---": 999, "": pd.NA})
             out[col] = pd.to_numeric(out[col], errors="coerce")
+    return out
+
+
+def detect_unscored_values(df: pd.DataFrame, question_cols: List[str]) -> pd.DataFrame:
+    """Find text values in question columns that cannot be converted to numbers."""
+    rows = []
+    for col in question_cols:
+        if col not in df.columns:
+            continue
+        s = df[col]
+        as_text = s.astype("string").str.strip()
+        numeric = pd.to_numeric(s, errors="coerce")
+        mask = (
+            s.notna()
+            & ~as_text.isin(["", "---", "999"])
+            & ~numeric.notna()
+        )
+        if mask.any():
+            for value, count in as_text[mask].value_counts(dropna=True).items():
+                rows.append({
+                    "Column": col,
+                    "Uploaded value": str(value),
+                    "Rows": int(count),
+                })
+    return pd.DataFrame(rows)
+
+
+def default_score_suggestion(value: str):
+    v = str(value).strip().lower()
+    positive = {"correct", "yes", "true", "y", "صحيح", "نعم"}
+    negative = {"incorrect", "wrong", "no", "false", "n", "خطأ", "غير صحيح", "لا"}
+    missing = {"no response", "no_response", "noresponse", "missing", "na", "n/a", "null", "blank", "لا استجابة", "بدون استجابة"}
+    if v in positive:
+        return 1
+    if v in negative:
+        return 0
+    if v in missing:
+        return 999
+    return None
+
+
+def apply_value_recode(df: pd.DataFrame, question_cols: List[str], recode_mapping: Dict[str, object]) -> pd.DataFrame:
+    """Replace non-numeric text answers in question fields with user-selected scores."""
+    out = df.copy()
+    clean_mapping = {}
+    for value, score in recode_mapping.items():
+        try:
+            clean_mapping[str(value).strip().lower()] = float(score)
+        except Exception:
+            continue
+
+    for col in question_cols:
+        if col not in out.columns:
+            continue
+        def recode_cell(x):
+            if pd.isna(x):
+                return x
+            key = str(x).strip().lower()
+            return clean_mapping.get(key, x)
+        out[col] = out[col].map(recode_cell)
     return out
 
 
@@ -273,7 +337,7 @@ def go_back():
 
 
 def show_progress():
-    labels = ["1. Upload Structure", "2. Map Columns", "3. Review Rows", "4. Question Actions", "5. Download"]
+    labels = ["1. Upload Structure", "2. Map Columns", "3. Score Text Values", "4. Review Rows", "5. Question Actions", "6. Download"]
     current = st.session_state.step
     st.progress((current - 1) / (len(labels) - 1))
     st.write(" → ".join([f"**{x}**" if i + 1 == current else x for i, x in enumerate(labels)]))
@@ -448,7 +512,7 @@ elif st.session_state.step == 2:
 
         required_keys = META_COLUMNS + BASELINE_QUESTION_COLS + ENDLINE_QUESTION_COLS
 
-        if st.button("Next: Review rows", type="primary"):
+        if st.button("Next: Score text values", type="primary"):
             missing = [k for k in required_keys if not mapping.get(k)]
             selected = [mapping.get(k, "") for k in required_keys if mapping.get(k)]
             duplicates = sorted({x for x in selected if selected.count(x) > 1})
@@ -485,7 +549,7 @@ elif st.session_state.step == 2:
                 selectbox_mapping(f"{base_col} / endline", base_col, end_cols, f"end_{base_col}", mapping, endline_hint=True)
 
         required_keys = ["base_id", "end_id", "base_IDELA_date"] + [f"base_{c}" for c in META_COLUMNS if c not in ["caseid", "IDELA_date"]] + [f"base_{c}" for c in BASELINE_QUESTION_COLS] + [f"end_{c}" for c in BASELINE_QUESTION_COLS]
-        if st.button("Next: Review rows", type="primary"):
+        if st.button("Next: Score text values", type="primary"):
             missing = [k for k in required_keys if not mapping.get(k)]
             base_selected = [mapping.get(k, "") for k in required_keys if k.startswith("base_") and mapping.get(k)] + ([mapping.get("base_id")] if mapping.get("base_id") else [])
             end_selected = [mapping.get(k, "") for k in required_keys if k.startswith("end_") and mapping.get(k)] + ([mapping.get("end_id")] if mapping.get("end_id") else [])
@@ -529,7 +593,7 @@ elif st.session_state.step == 2:
             st.dataframe(raw_df.head(20), use_container_width=True)
 
         required_keys = ["dup_id", "round_col", "meta_IDELA_date"] + [f"meta_{c}" for c in META_COLUMNS if c not in ["caseid", "IDELA_date"]] + [f"q_{c}" for c in BASELINE_QUESTION_COLS]
-        if st.button("Next: Review rows", type="primary"):
+        if st.button("Next: Score text values", type="primary"):
             missing = [k for k in required_keys if not mapping.get(k)]
             selected = [mapping.get(k, "") for k in required_keys if mapping.get(k)]
             duplicates = sorted({x for x in selected if x and selected.count(x) > 1})
@@ -549,10 +613,84 @@ elif st.session_state.step == 2:
     if st.button("Back"):
         go_back()
 
-# STEP 3: Row review
+# STEP 3: Score/recode text values
 elif st.session_state.step == 3:
-    st.subheader("Step 3: Review rows with high missing percentage")
+    st.subheader("Step 3: Score text values in question fields")
     mapped_df = st.session_state.mapped_df.copy()
+    all_question_cols = [c for c in BASELINE_QUESTION_COLS + ENDLINE_QUESTION_COLS if c in mapped_df.columns]
+    unscored_df = detect_unscored_values(mapped_df, all_question_cols)
+
+    if unscored_df.empty:
+        st.success("All question fields are already numeric, or contain only recognized missing values.")
+        st.session_state.scored_df = mapped_df
+        c1, c2 = st.columns(2)
+        with c1:
+            if st.button("Back"):
+                go_back()
+        with c2:
+            if st.button("Next: Review rows", type="primary"):
+                go_next()
+    else:
+        st.warning("Some question values are text/not scored. Enter the numeric score for each uploaded value.")
+        unique_values = (
+            unscored_df.groupby("Uploaded value", as_index=False)
+            .agg({"Rows": "sum", "Column": lambda x: ", ".join(sorted(set(x))[:5]) + ("..." if len(set(x)) > 5 else "")})
+            .rename(columns={"Column": "Example columns", "Rows": "Total rows"})
+        )
+
+        recode_rows = []
+        saved = st.session_state.value_recode_mapping or {}
+        for _, row in unique_values.iterrows():
+            uploaded_value = row["Uploaded value"]
+            suggestion = saved.get(uploaded_value, default_score_suggestion(uploaded_value))
+            recode_rows.append({
+                "Uploaded value": uploaded_value,
+                "Replacement score": "" if suggestion is None else suggestion,
+                "Total rows": row["Total rows"],
+                "Example columns": row["Example columns"],
+            })
+
+        recode_df = pd.DataFrame(recode_rows)
+        edited_recode = st.data_editor(
+            recode_df,
+            column_config={
+                "Uploaded value": st.column_config.TextColumn("Uploaded value", disabled=True),
+                "Replacement score": st.column_config.NumberColumn("Replacement score", help="Example: correct = 1, incorrect = 0, no response = 999 or 0 based on your rule."),
+                "Total rows": st.column_config.NumberColumn("Total rows", disabled=True),
+                "Example columns": st.column_config.TextColumn("Example columns", disabled=True),
+            },
+            disabled=["Uploaded value", "Total rows", "Example columns"],
+            hide_index=True,
+            use_container_width=True,
+            key="value_recode_editor",
+        )
+
+        st.info("Use 999 if the value should remain missing and be handled later in Question Actions. Use 0 if you want to score it as zero.")
+
+        c1, c2 = st.columns(2)
+        with c1:
+            if st.button("Back"):
+                go_back()
+        with c2:
+            if st.button("Apply scores and continue", type="primary"):
+                missing_scores = edited_recode[edited_recode["Replacement score"].isna() | (edited_recode["Replacement score"].astype("string").str.strip() == "")]
+                if len(missing_scores) > 0:
+                    st.error("Please enter a replacement score for every uploaded value before continuing.")
+                else:
+                    recode_mapping = dict(zip(edited_recode["Uploaded value"], edited_recode["Replacement score"]))
+                    st.session_state.value_recode_mapping = recode_mapping
+                    scored_df = apply_value_recode(mapped_df, all_question_cols, recode_mapping)
+                    remaining_unscored = detect_unscored_values(scored_df, all_question_cols)
+                    if len(remaining_unscored) > 0:
+                        st.error("Some text values are still not scored. Please review the list again.")
+                    else:
+                        st.session_state.scored_df = scored_df
+                        go_next()
+
+# STEP 4: Row review
+elif st.session_state.step == 4:
+    st.subheader("Step 4: Review rows with high missing percentage")
+    mapped_df = st.session_state.scored_df.copy() if st.session_state.scored_df is not None else st.session_state.mapped_df.copy()
 
     if "IDELA_date" not in mapped_df.columns:
         st.error("IDELA_date is missing. Go back and map it.")
@@ -638,9 +776,9 @@ elif st.session_state.step == 3:
         if st.button("Next: Question actions", type="primary"):
             go_next()
 
-# STEP 4: Question actions
-elif st.session_state.step == 4:
-    st.subheader("Step 4: Question Missing Review and Actions")
+# STEP 5: Question actions
+elif st.session_state.step == 5:
+    st.subheader("Step 5: Question Missing Review and Actions")
     clean_base = st.session_state.clean_base.copy()
     action_options = ["No action", "change missing to 0", "drop this question"]
 
@@ -688,9 +826,9 @@ elif st.session_state.step == 4:
         if st.button("Next: Download", type="primary"):
             go_next()
 
-# STEP 5: Download
-elif st.session_state.step == 5:
-    st.subheader("Step 5: Preview and Download")
+# STEP 6: Download
+elif st.session_state.step == 6:
+    st.subheader("Step 6: Preview and Download")
     clean_base = st.session_state.clean_base.copy()
     filtered_df = st.session_state.filtered_df.copy()
     actions = st.session_state.actions
