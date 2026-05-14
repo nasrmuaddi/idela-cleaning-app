@@ -349,7 +349,7 @@ if st.session_state.step == 1:
         [
             "One file: baseline and endline are in the same row",
             "Two files: one baseline file and one endline file",
-            "One file: baseline and endline are duplicated rows",
+            "One file: baseline and endline are duplicated rows for one client",
         ],
         index=0,
         key="upload_type_radio",
