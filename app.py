@@ -1,16 +1,14 @@
 import io
-from typing import Dict, List
+import re
+import difflib
+from typing import Dict, List, Tuple
+
 import pandas as pd
 import streamlit as st
 
 st.set_page_config(page_title="IDELA Cleaning App", layout="wide")
 st.title("IDELA Cleaning App")
-st.caption("Upload raw IDELA Excel data, review missing values, choose actions, and download a cleaned workbook.")
-
-BASELINE_START = "i1a_name_mark"
-BASELINE_END = "i21_steps"
-ENDLINE_START = "i1a_name_mark_post"
-ENDLINE_END = "i21_steps_post"
+st.caption("Map columns, review missing values, choose actions, and download a cleaned workbook.")
 
 META_COLUMNS = [
     "caseid", "IDELA_date", "idela_child_pwd", "If_yes_due_to_pwd",
@@ -96,34 +94,85 @@ QUESTION_LABELS = {
     "i21_steps": "عدد الخطوات التي قفزها (بحد أقصى 10) | Number of steps hopped (Maximum 10 steps.)",
 }
 
-
-def find_range_columns(df: pd.DataFrame, start_col: str, end_col: str) -> List[str]:
-    cols = list(df.columns)
-    if start_col not in cols or end_col not in cols:
-        return []
-    return cols[cols.index(start_col):cols.index(end_col) + 1]
+BASELINE_QUESTION_COLS = list(QUESTION_LABELS.keys())
+ENDLINE_QUESTION_COLS = [f"{c}_post" for c in BASELINE_QUESTION_COLS]
+REQUIRED_MAPPING_COLS = META_COLUMNS + BASELINE_QUESTION_COLS + ENDLINE_QUESTION_COLS
+MANDATORY_COLS = ["IDELA_date"] + BASELINE_QUESTION_COLS + ENDLINE_QUESTION_COLS
 
 
-def normalize_score_values(df: pd.DataFrame, question_cols: List[str]) -> pd.DataFrame:
-    out = df.copy()
-    for col in question_cols:
-        out[col] = out[col].replace({"---": 999, "": pd.NA})
-        out[col] = pd.to_numeric(out[col], errors="coerce")
-    return out
+def init_state():
+    defaults = {
+        "step": 1,
+        "column_mapping": {},
+        "mapped_df": None,
+        "clean_base": None,
+        "filtered_df": None,
+        "actions": {},
+        "selected_delete_indices": set(),
+    }
+    for key, value in defaults.items():
+        if key not in st.session_state:
+            st.session_state[key] = value
+
+
+def normalize_name(name: str) -> str:
+    return re.sub(r"[^a-zA-Z0-9]+", "", str(name).strip().lower())
+
+
+def suggest_column(required_col: str, uploaded_cols: List[str]) -> str:
+    if required_col in uploaded_cols:
+        return required_col
+
+    required_norm = normalize_name(required_col)
+    norm_lookup = {normalize_name(c): c for c in uploaded_cols}
+    if required_norm in norm_lookup:
+        return norm_lookup[required_norm]
+
+    # Try without _post for messy endline headers.
+    if required_col.endswith("_post"):
+        no_post_norm = normalize_name(required_col.replace("_post", ""))
+        endline_candidates = [c for c in uploaded_cols if any(x in normalize_name(c) for x in ["post", "endline", "end", "el"])]
+        candidate_lookup = {normalize_name(c).replace("post", "").replace("endline", "").replace("end", ""): c for c in endline_candidates}
+        if no_post_norm in candidate_lookup:
+            return candidate_lookup[no_post_norm]
+
+    matches = difflib.get_close_matches(required_norm, [normalize_name(c) for c in uploaded_cols], n=1, cutoff=0.78)
+    if matches:
+        return norm_lookup.get(matches[0], "")
+    return ""
+
+
+def apply_column_mapping(raw_df: pd.DataFrame, mapping: Dict[str, str]) -> pd.DataFrame:
+    # selected uploaded column -> standard required column
+    rename_dict = {uploaded: required for required, uploaded in mapping.items() if uploaded}
+    mapped = raw_df.rename(columns=rename_dict).copy()
+
+    # Keep only one copy if the source already had the target and a duplicate was created.
+    mapped = mapped.loc[:, ~mapped.columns.duplicated()].copy()
+    return mapped
 
 
 def is_missing_question_value(series: pd.Series) -> pd.Series:
-    """Treat 999, --- and blank/null as missing question values."""
     as_text = series.astype("string").str.strip()
     numeric = pd.to_numeric(series, errors="coerce")
     return series.isna() | as_text.isin(["---", "", "999"]) | numeric.eq(999)
 
 
+def normalize_score_values(df: pd.DataFrame, question_cols: List[str]) -> pd.DataFrame:
+    out = df.copy()
+    for col in question_cols:
+        if col in out.columns:
+            out[col] = out[col].replace({"---": 999, "": pd.NA})
+            out[col] = pd.to_numeric(out[col], errors="coerce")
+    return out
+
+
 def missing_pct(df: pd.DataFrame, cols: List[str]) -> pd.Series:
-    if not cols:
+    existing = [c for c in cols if c in df.columns]
+    if not existing:
         return pd.Series([0.0] * len(df), index=df.index)
-    missing_flags = pd.concat([is_missing_question_value(df[col]) for col in cols], axis=1)
-    return missing_flags.sum(axis=1) / len(cols)
+    missing_flags = pd.concat([is_missing_question_value(df[col]) for col in existing], axis=1)
+    return missing_flags.sum(axis=1) / len(existing)
 
 
 def question_missing_pct(df: pd.DataFrame, col: str) -> float:
@@ -133,7 +182,6 @@ def question_missing_pct(df: pd.DataFrame, col: str) -> float:
 
 
 def get_remaining_missing_summary(df: pd.DataFrame, question_cols: List[str]) -> pd.DataFrame:
-    """Return question columns that still have 999/---/blank/null values."""
     rows = []
     for col in question_cols:
         if col not in df.columns:
@@ -164,23 +212,12 @@ def apply_actions(df: pd.DataFrame, actions: Dict[str, str]) -> pd.DataFrame:
 
 
 def create_by_question(clean_df: pd.DataFrame, baseline_cols: List[str]) -> pd.DataFrame:
-    """
-    Create the BY QUESTION sheet.
-
-    baseline idela score = row sum from i1a_name_mark to i21_steps
-    endline idela score = row sum from i1a_name_mark_post to i21_steps_post
-    idela score = endline idela score - baseline idela score
-
-    The score uses only question columns that still exist after Step 3 actions.
-    """
     out = clean_df[[c for c in META_COLUMNS if c in clean_df.columns]].copy()
-
     used_baseline_score_cols = []
     used_endline_score_cols = []
 
     for base_col in baseline_cols:
         post_col = f"{base_col}_post"
-
         if base_col not in clean_df.columns or post_col not in clean_df.columns:
             continue
 
@@ -193,27 +230,16 @@ def create_by_question(clean_df: pd.DataFrame, baseline_cols: List[str]) -> pd.D
         comp_col = base_col.replace("_mark", "_mark_comparison")
         if comp_col == base_col:
             comp_col = f"{base_col}_comparison"
-
         out[comp_col] = post_numeric - base_numeric
 
         used_baseline_score_cols.append(base_col)
         used_endline_score_cols.append(post_col)
 
-    if used_baseline_score_cols:
-        baseline_score_df = clean_df[used_baseline_score_cols].apply(pd.to_numeric, errors="coerce")
-        out["baseline idela score"] = baseline_score_df.sum(axis=1)
-    else:
-        out["baseline idela score"] = 0
-
-    if used_endline_score_cols:
-        endline_score_df = clean_df[used_endline_score_cols].apply(pd.to_numeric, errors="coerce")
-        out["endline idela score"] = endline_score_df.sum(axis=1)
-    else:
-        out["endline idela score"] = 0
-
+    out["baseline idela score"] = clean_df[used_baseline_score_cols].apply(pd.to_numeric, errors="coerce").sum(axis=1) if used_baseline_score_cols else 0
+    out["endline idela score"] = clean_df[used_endline_score_cols].apply(pd.to_numeric, errors="coerce").sum(axis=1) if used_endline_score_cols else 0
     out["idela score"] = out["endline idela score"] - out["baseline idela score"]
-
     return out
+
 
 def to_excel_bytes(sheets: Dict[str, pd.DataFrame]) -> bytes:
     output = io.BytesIO()
@@ -221,105 +247,160 @@ def to_excel_bytes(sheets: Dict[str, pd.DataFrame]) -> bytes:
         for sheet_name, data in sheets.items():
             safe_name = sheet_name[:31]
             data.to_excel(writer, sheet_name=safe_name, index=False)
-
             workbook = writer.book
             worksheet = writer.sheets[safe_name]
-
-            header_format = workbook.add_format({
-                "bold": True,
-                "bg_color": "#D9EAD3",
-                "border": 1
-            })
-
+            header_format = workbook.add_format({"bold": True, "bg_color": "#D9EAD3", "border": 1})
+            percent_format = workbook.add_format({"num_format": "0.0%"})
             for col_num, value in enumerate(data.columns.values):
                 worksheet.write(0, col_num, value, header_format)
                 worksheet.set_column(col_num, col_num, min(max(len(str(value)) + 2, 12), 45))
-
+                if "%" in str(value).lower():
+                    worksheet.set_column(col_num, col_num, 18, percent_format)
             worksheet.autofilter(0, 0, max(len(data), 1), max(len(data.columns) - 1, 0))
             worksheet.freeze_panes(1, 0)
     return output.getvalue()
 
 
+def go_next():
+    st.session_state.step += 1
+    st.rerun()
+
+
+def go_back():
+    st.session_state.step -= 1
+    st.rerun()
+
+
+def show_progress():
+    labels = ["1. Map Columns", "2. Review Rows", "3. Question Actions", "4. Download"]
+    current = st.session_state.step
+    st.progress((current - 1) / (len(labels) - 1))
+    st.write(" → ".join([f"**{x}**" if i + 1 == current else x for i, x in enumerate(labels)]))
+
+
+init_state()
+
 uploaded_file = st.file_uploader("Upload Excel file", type=["xlsx", "xlsm", "xls"])
 
-if uploaded_file:
-    xl = pd.ExcelFile(uploaded_file)
-    sheet_name = st.selectbox("Select raw data sheet", xl.sheet_names)
-    raw_df = pd.read_excel(uploaded_file, sheet_name=sheet_name)
+if not uploaded_file:
+    st.info("Upload your Excel file to start.")
+    st.stop()
 
-    st.subheader("1) Raw Data Preview")
-    st.dataframe(raw_df.head(20), use_container_width=True)
+xl = pd.ExcelFile(uploaded_file)
+sheet_name = st.selectbox("Select raw data sheet", xl.sheet_names)
+raw_df = pd.read_excel(uploaded_file, sheet_name=sheet_name)
 
-    if "IDELA_date" not in raw_df.columns:
-        st.error("Column IDELA_date was not found.")
+show_progress()
+st.divider()
+
+# STEP 1: Mapping
+if st.session_state.step == 1:
+    st.subheader("Step 1: Map uploaded columns to IDELA columns")
+    st.write("For each required IDELA column, choose the matching column from the uploaded file. Auto-detected matches are preselected.")
+
+    uploaded_cols = list(raw_df.columns)
+    options = [""] + uploaded_cols
+
+    tab_required, tab_optional, tab_preview = st.tabs(["Required questions", "Optional info columns", "Raw preview"])
+
+    mapping = dict(st.session_state.column_mapping) if st.session_state.column_mapping else {}
+
+    with tab_required:
+        st.warning("You must map IDELA_date and all baseline/endline question columns before moving to the next step.")
+        for req_col in MANDATORY_COLS:
+            suggested = mapping.get(req_col, suggest_column(req_col, uploaded_cols))
+            index = options.index(suggested) if suggested in options else 0
+            mapping[req_col] = st.selectbox(
+                req_col,
+                options=options,
+                index=index,
+                key=f"map_required_{req_col}"
+            )
+
+    with tab_optional:
+        st.write("These columns are optional but recommended for the final output.")
+        optional_cols = [c for c in META_COLUMNS if c != "IDELA_date"]
+        for req_col in optional_cols:
+            suggested = mapping.get(req_col, suggest_column(req_col, uploaded_cols))
+            index = options.index(suggested) if suggested in options else 0
+            mapping[req_col] = st.selectbox(
+                req_col,
+                options=options,
+                index=index,
+                key=f"map_optional_{req_col}"
+            )
+
+    with tab_preview:
+        st.dataframe(raw_df.head(20), use_container_width=True)
+
+    st.session_state.column_mapping = mapping
+
+    selected_required = [mapping.get(c, "") for c in MANDATORY_COLS]
+    missing_required = [c for c in MANDATORY_COLS if not mapping.get(c)]
+    duplicate_selected = sorted({x for x in selected_required if x and selected_required.count(x) > 1})
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Uploaded columns", len(uploaded_cols))
+    c2.metric("Required not mapped", len(missing_required))
+    c3.metric("Duplicate mappings", len(duplicate_selected))
+
+    if missing_required:
+        with st.expander("Required columns still not mapped"):
+            st.write(missing_required)
+
+    if duplicate_selected:
+        st.error("Some uploaded columns are mapped more than once. Fix these before continuing: " + ", ".join(duplicate_selected))
+
+    if st.button("Next: Review rows", type="primary"):
+        if missing_required:
+            st.error("Please map all required IDELA_date and question columns before continuing.")
+        elif duplicate_selected:
+            st.error("Please remove duplicate mappings before continuing.")
+        else:
+            mapped_df = apply_column_mapping(raw_df, mapping)
+            st.session_state.mapped_df = mapped_df
+            st.session_state.selected_delete_indices = set()
+            go_next()
+
+# STEP 2: Row review
+elif st.session_state.step == 2:
+    st.subheader("Step 2: Review rows with high missing percentage")
+    mapped_df = st.session_state.mapped_df.copy()
+
+    if "IDELA_date" not in mapped_df.columns:
+        st.error("IDELA_date is missing. Go back and map it.")
         st.stop()
 
-    raw_df["IDELA_date_parsed"] = pd.to_datetime(raw_df["IDELA_date"], errors="coerce")
-    filtered_df = raw_df[raw_df["IDELA_date_parsed"].notna()].drop(columns=["IDELA_date_parsed"]).copy()
-
-    baseline_cols = find_range_columns(filtered_df, BASELINE_START, BASELINE_END)
-    endline_cols = find_range_columns(filtered_df, ENDLINE_START, ENDLINE_END)
-    all_question_cols = baseline_cols + endline_cols
-
+    mapped_df["IDELA_date_parsed"] = pd.to_datetime(mapped_df["IDELA_date"], errors="coerce")
+    filtered_df = mapped_df[mapped_df["IDELA_date_parsed"].notna()].drop(columns=["IDELA_date_parsed"]).copy()
+    all_question_cols = [c for c in BASELINE_QUESTION_COLS + ENDLINE_QUESTION_COLS if c in filtered_df.columns]
     filtered_df = normalize_score_values(filtered_df, all_question_cols)
 
     filtered_df.insert(0, "Delete Action", "")
-    filtered_df.insert(1, "baseline missing %", missing_pct(filtered_df, baseline_cols))
-    filtered_df.insert(2, "endline missing %", missing_pct(filtered_df, endline_cols))
+    filtered_df.insert(1, "baseline missing %", missing_pct(filtered_df, BASELINE_QUESTION_COLS))
+    filtered_df.insert(2, "endline missing %", missing_pct(filtered_df, ENDLINE_QUESTION_COLS))
+    st.session_state.filtered_df = filtered_df
 
-    st.subheader("2) Filtered on IDELA Date")
     st.write(f"Rows kept after IDELA_date validation: **{len(filtered_df)}**")
 
-    high_missing = filtered_df[
-        (filtered_df["baseline missing %"] > 0.30) |
-        (filtered_df["endline missing %"] > 0.30)
-    ].copy()
-
+    high_missing = filtered_df[(filtered_df["baseline missing %"] > 0.30) | (filtered_df["endline missing %"] > 0.30)].copy()
     st.warning(f"Rows with baseline or endline missing above 30%: {len(high_missing)}")
 
     delete_indices = []
-
     if len(high_missing) > 0:
-        st.write("Select rows to delete. Unselected rows will be kept.")
-
-        if "selected_delete_indices" not in st.session_state:
-            st.session_state.selected_delete_indices = set()
-
         high_missing_display = high_missing.copy()
-        high_missing_display["baseline missing %"] = high_missing_display["baseline missing %"] * 100
-        high_missing_display["endline missing %"] = high_missing_display["endline missing %"] * 100
+        high_missing_display["baseline missing %"] *= 100
+        high_missing_display["endline missing %"] *= 100
 
-        display_cols = []
-        important_cols = [
-            "caseid",
-            "d_childs_full_name",
-            "child_name",
-            "student_name",
-            "e_childs_sex",
-            "f_childs_age",
-            "teacher_location",
-        ]
-        for col in important_cols:
-            if col in high_missing_display.columns:
-                display_cols.append(col)
-
+        display_cols = [c for c in ["caseid", "d_childs_full_name", "child_name", "student_name", "e_childs_sex", "f_childs_age", "teacher_location"] if c in high_missing_display.columns]
         display_cols += ["baseline missing %", "endline missing %"]
 
         c1, c2, c3, c4 = st.columns(4)
-
         with c1:
             page_size = st.selectbox("Rows per page", [50, 100, 200, 500], index=1)
-
         total_pages = max(1, (len(high_missing_display) - 1) // page_size + 1)
-
         with c2:
-            page = st.number_input(
-                "Page",
-                min_value=1,
-                max_value=total_pages,
-                value=1,
-                step=1
-            )
+            page = st.number_input("Page", min_value=1, max_value=total_pages, value=1, step=1)
 
         start = (page - 1) * page_size
         end = start + page_size
@@ -330,7 +411,6 @@ if uploaded_file:
             if st.button("Select all on this page"):
                 st.session_state.selected_delete_indices |= current_page_indices
                 st.rerun()
-
         with c4:
             if st.button("Clear this page"):
                 st.session_state.selected_delete_indices -= current_page_indices
@@ -341,135 +421,111 @@ if uploaded_file:
             if st.button("Select ALL high-missing rows"):
                 st.session_state.selected_delete_indices = set(high_missing_display.index)
                 st.rerun()
-
         with c6:
             if st.button("Clear ALL selections"):
                 st.session_state.selected_delete_indices = set()
                 st.rerun()
 
         page_df["Select Delete"] = page_df.index.isin(st.session_state.selected_delete_indices)
-        page_display_cols = ["Select Delete"] + display_cols
-
         edited_page = st.data_editor(
-            page_df[page_display_cols],
+            page_df[["Select Delete"] + display_cols],
             use_container_width=True,
             hide_index=False,
             key=f"delete_editor_page_{page}_{page_size}",
             column_config={
-                "baseline missing %": st.column_config.NumberColumn(
-                    "baseline missing %",
-                    format="%.1f%%"
-                ),
-                "endline missing %": st.column_config.NumberColumn(
-                    "endline missing %",
-                    format="%.1f%%"
-                )
-            }
+                "baseline missing %": st.column_config.NumberColumn("baseline missing %", format="%.1f%%"),
+                "endline missing %": st.column_config.NumberColumn("endline missing %", format="%.1f%%"),
+            },
         )
 
-        selected_on_page = set(
-            edited_page.index[edited_page["Select Delete"] == True].tolist()
-        )
-
+        selected_on_page = set(edited_page.index[edited_page["Select Delete"] == True].tolist())
         st.session_state.selected_delete_indices -= current_page_indices
         st.session_state.selected_delete_indices |= selected_on_page
-
         delete_indices = list(st.session_state.selected_delete_indices)
-
-        st.info(
-            f"Selected rows to delete: **{len(delete_indices)}** out of **{len(high_missing_display)}** high-missing rows. "
-            f"Showing page **{page}** of **{total_pages}**."
-        )
+        st.info(f"Selected rows to delete: **{len(delete_indices)}** out of **{len(high_missing_display)}** high-missing rows. Showing page **{page}** of **{total_pages}**.")
 
     clean_base = filtered_df.drop(index=delete_indices).copy()
     clean_base = clean_base.drop(columns=["Delete Action", "baseline missing %", "endline missing %"], errors="ignore")
+    st.session_state.clean_base = clean_base
 
-    st.subheader("3) Question Missing Review and Actions")
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button("Back"):
+            go_back()
+    with c2:
+        if st.button("Next: Question actions", type="primary"):
+            go_next()
 
-    actions = {}
+# STEP 3: Question actions
+elif st.session_state.step == 3:
+    st.subheader("Step 3: Question Missing Review and Actions")
+    clean_base = st.session_state.clean_base.copy()
     action_options = ["No action", "change missing to 0", "drop this question"]
 
-    if not baseline_cols:
-        st.error("Baseline question columns were not found. Check column names.")
-    else:
-        question_review_rows = []
-        for base_col in baseline_cols:
-            post_col = f"{base_col}_post"
-            question_name = QUESTION_LABELS.get(base_col, base_col)
-            if " | " in question_name:
-                arabic_name, english_name = question_name.split(" | ", 1)
-            else:
-                arabic_name, english_name = "", question_name
+    question_review_rows = []
+    for base_col in BASELINE_QUESTION_COLS:
+        post_col = f"{base_col}_post"
+        question_name = QUESTION_LABELS.get(base_col, base_col)
+        arabic_name, english_name = question_name.split(" | ", 1) if " | " in question_name else ("", question_name)
+        question_review_rows.append({
+            "Baseline ID": base_col,
+            "Endline ID": post_col,
+            "Arabic": arabic_name,
+            "English": english_name,
+            "% Missing Baseline": question_missing_pct(clean_base, base_col),
+            "% Missing Endline": question_missing_pct(clean_base, post_col),
+            "Action": st.session_state.actions.get(base_col, "No action"),
+        })
 
-            question_review_rows.append({
-                "Baseline ID": base_col,
-                "Endline ID": post_col if post_col in clean_base.columns else "",
-                "Arabic": arabic_name,
-                "English": english_name,
-                "% Missing Baseline": question_missing_pct(clean_base, base_col),
-                "% Missing Endline": question_missing_pct(clean_base, post_col) if post_col in clean_base.columns else 0.0,
-                "Action": "No action"
-            })
+    question_review_df = pd.DataFrame(question_review_rows)
+    edited_actions = st.data_editor(
+        question_review_df,
+        column_config={
+            "Baseline ID": st.column_config.TextColumn("Baseline ID", disabled=True),
+            "Endline ID": st.column_config.TextColumn("Endline ID", disabled=True),
+            "Arabic": st.column_config.TextColumn("Arabic", disabled=True),
+            "English": st.column_config.TextColumn("English", disabled=True),
+            "% Missing Baseline": st.column_config.ProgressColumn("% Missing Baseline", format="%.1f%%", min_value=0, max_value=1),
+            "% Missing Endline": st.column_config.ProgressColumn("% Missing Endline", format="%.1f%%", min_value=0, max_value=1),
+            "Action": st.column_config.SelectboxColumn("Action", options=action_options, required=True),
+        },
+        disabled=["Baseline ID", "Endline ID", "Arabic", "English", "% Missing Baseline", "% Missing Endline"],
+        hide_index=True,
+        use_container_width=True,
+        key="question_action_editor",
+    )
 
-        question_review_df = pd.DataFrame(question_review_rows)
+    st.session_state.actions = dict(zip(edited_actions["Baseline ID"], edited_actions["Action"]))
+    st.info("If you choose 'drop this question', both the baseline question and its matching post/endline question are removed.")
 
-        edited_actions = st.data_editor(
-            question_review_df,
-            column_config={
-                "Baseline ID": st.column_config.TextColumn("Baseline ID", disabled=True),
-                "Endline ID": st.column_config.TextColumn("Endline ID", disabled=True),
-                "Arabic": st.column_config.TextColumn("Arabic", disabled=True),
-                "English": st.column_config.TextColumn("English", disabled=True),
-                "% Missing Baseline": st.column_config.ProgressColumn(
-                    "% Missing Baseline",
-                    format="%.1f%%",
-                    min_value=0,
-                    max_value=1
-                ),
-                "% Missing Endline": st.column_config.ProgressColumn(
-                    "% Missing Endline",
-                    format="%.1f%%",
-                    min_value=0,
-                    max_value=1
-                ),
-                "Action": st.column_config.SelectboxColumn(
-                    "Action",
-                    options=action_options,
-                    required=True
-                )
-            },
-            disabled=[
-                "Baseline ID",
-                "Endline ID",
-                "Arabic",
-                "English",
-                "% Missing Baseline",
-                "% Missing Endline",
-            ],
-            hide_index=True,
-            use_container_width=True,
-            key="question_action_editor"
-        )
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button("Back"):
+            go_back()
+    with c2:
+        if st.button("Next: Download", type="primary"):
+            go_next()
 
-        actions = dict(zip(edited_actions["Baseline ID"], edited_actions["Action"]))
-
-        st.info("If you choose 'drop this question', both the baseline question and its matching post/endline question are removed.")
+# STEP 4: Download
+elif st.session_state.step == 4:
+    st.subheader("Step 4: Preview and Download")
+    clean_base = st.session_state.clean_base.copy()
+    filtered_df = st.session_state.filtered_df.copy()
+    actions = st.session_state.actions
 
     clean_df = apply_actions(clean_base, actions)
-    by_question_df = create_by_question(clean_df, baseline_cols)
+    by_question_df = create_by_question(clean_df, BASELINE_QUESTION_COLS)
 
-    st.subheader("4) Clean Data Preview")
+    st.write("Clean data preview")
     st.dataframe(clean_df.head(20), use_container_width=True)
 
-    remaining_question_cols = [c for c in (baseline_cols + endline_cols) if c in clean_df.columns]
+    remaining_question_cols = [c for c in BASELINE_QUESTION_COLS + ENDLINE_QUESTION_COLS if c in clean_df.columns]
     remaining_missing_summary = get_remaining_missing_summary(clean_df, remaining_question_cols)
 
     if len(remaining_missing_summary) > 0:
         missing_columns = sorted(remaining_missing_summary["Question ID"].tolist())
-        st.error(
-            "Download is blocked. Missing is still in these columns:\n\n"
-            + "\n".join(missing_columns)
-        )
+        st.error("Download is blocked. Missing is still in these columns:\n\n" + "\n".join(missing_columns))
+        st.warning("Go back to Step 3 and choose an action for these question columns, such as changing missing to 0 or dropping the question.")
     else:
         sheets = {
             "filtered on Idela": filtered_df,
@@ -477,18 +533,17 @@ if uploaded_file:
             "BY QUESTION": by_question_df,
             "BY ITEM": pd.DataFrame(),
             "BY DOMAIN": pd.DataFrame(),
-            "IDELA ANALYSIS": pd.DataFrame()
+            "IDELA ANALYSIS": pd.DataFrame(),
         }
-
         excel_bytes = to_excel_bytes(sheets)
-
         st.success("No 999, ---, blank, or null values remain in the question columns. You can download the cleaned workbook.")
         st.download_button(
             label="Download cleaned IDELA workbook",
             data=excel_bytes,
             file_name="idela_cleaned_output.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            type="primary",
         )
 
-else:
-    st.info("Upload your Excel file to start.")
+    if st.button("Back"):
+        go_back()
