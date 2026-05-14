@@ -183,30 +183,24 @@ if uploaded_file:
         for base_col in baseline_cols:
             post_col = f"{base_col}_post"
             question_review_rows.append({
-                "Baseline Question": base_col,
-                "Baseline Missing %": question_missing_pct(clean_base, base_col),
-                "Endline Question": post_col if post_col in clean_base.columns else "",
-                "Endline Missing %": question_missing_pct(clean_base, post_col) if post_col in clean_base.columns else 0.0,
-                "Action": "No action"
-            })
 
         question_review_df = pd.DataFrame(question_review_rows)
 
         edited_actions = st.data_editor(
             question_review_df,
             column_config={
-                "Baseline Missing %": st.column_config.ProgressColumn(
-                    "Baseline Missing %",
-                    format="%.1f%%",
-                    min_value=0,
-                    max_value=1
-                ),
-                "Endline Missing %": st.column_config.ProgressColumn(
-                    "Endline Missing %",
-                    format="%.1f%%",
-                    min_value=0,
-                    max_value=1
-                ),
+            "Baseline Missing %": st.column_config.ProgressColumn(
+    "Baseline Missing %",
+    format="%.1f%%",
+    min_value=0,
+    max_value=100
+),
+"Endline Missing %": st.column_config.ProgressColumn(
+    "Endline Missing %",
+    format="%.1f%%",
+    min_value=0,
+    max_value=100
+),
                 "Action": st.column_config.SelectboxColumn(
                     "Action",
                     options=action_options,
