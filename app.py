@@ -1,14 +1,14 @@
 import io
 import re
 import difflib
-from typing import Dict, List, Tuple
+from typing import Dict, List
 
 import pandas as pd
 import streamlit as st
 
 st.set_page_config(page_title="IDELA Cleaning App", layout="wide")
 st.title("IDELA Cleaning App")
-st.caption("Map columns, review missing values, choose actions, and download a cleaned workbook.")
+st.caption("Upload, map columns, review missing values, choose actions, and download a cleaned workbook.")
 
 META_COLUMNS = [
     "caseid", "IDELA_date", "idela_child_pwd", "If_yes_due_to_pwd",
@@ -96,17 +96,16 @@ QUESTION_LABELS = {
 
 BASELINE_QUESTION_COLS = list(QUESTION_LABELS.keys())
 ENDLINE_QUESTION_COLS = [f"{c}_post" for c in BASELINE_QUESTION_COLS]
-REQUIRED_MAPPING_COLS = META_COLUMNS + BASELINE_QUESTION_COLS + ENDLINE_QUESTION_COLS
-MANDATORY_COLS = ["IDELA_date"] + BASELINE_QUESTION_COLS + ENDLINE_QUESTION_COLS
 
 
 def init_state():
     defaults = {
         "step": 1,
+        "upload_type": None,
         "column_mapping": {},
         "mapped_df": None,
-        "clean_base": None,
         "filtered_df": None,
+        "clean_base": None,
         "actions": {},
         "selected_delete_indices": set(),
     }
@@ -115,41 +114,53 @@ def init_state():
             st.session_state[key] = value
 
 
+def reset_after_upload_type_change():
+    st.session_state.column_mapping = {}
+    st.session_state.mapped_df = None
+    st.session_state.filtered_df = None
+    st.session_state.clean_base = None
+    st.session_state.actions = {}
+    st.session_state.selected_delete_indices = set()
+
+
 def normalize_name(name: str) -> str:
     return re.sub(r"[^a-zA-Z0-9]+", "", str(name).strip().lower())
 
 
-def suggest_column(required_col: str, uploaded_cols: List[str]) -> str:
+def suggest_column(required_col: str, uploaded_cols: List[str], endline_hint: bool = False) -> str:
     if required_col in uploaded_cols:
         return required_col
-
-    required_norm = normalize_name(required_col)
+    req_norm = normalize_name(required_col)
     norm_lookup = {normalize_name(c): c for c in uploaded_cols}
-    if required_norm in norm_lookup:
-        return norm_lookup[required_norm]
+    if req_norm in norm_lookup:
+        return norm_lookup[req_norm]
 
-    # Try without _post for messy endline headers.
-    if required_col.endswith("_post"):
-        no_post_norm = normalize_name(required_col.replace("_post", ""))
-        endline_candidates = [c for c in uploaded_cols if any(x in normalize_name(c) for x in ["post", "endline", "end", "el"])]
-        candidate_lookup = {normalize_name(c).replace("post", "").replace("endline", "").replace("end", ""): c for c in endline_candidates}
-        if no_post_norm in candidate_lookup:
-            return candidate_lookup[no_post_norm]
+    base_req = required_col.replace("_post", "")
+    base_norm = normalize_name(base_req)
 
-    matches = difflib.get_close_matches(required_norm, [normalize_name(c) for c in uploaded_cols], n=1, cutoff=0.78)
-    if matches:
-        return norm_lookup.get(matches[0], "")
-    return ""
+    candidates = uploaded_cols
+    if endline_hint:
+        hinted = [c for c in uploaded_cols if any(x in normalize_name(c) for x in ["post", "endline", "end", "followup", "el"])]
+        if hinted:
+            candidates = hinted
+
+    candidate_norms = []
+    clean_lookup = {}
+    for c in candidates:
+        n = normalize_name(c)
+        n_clean = n.replace("post", "").replace("endline", "").replace("followup", "").replace("baseline", "").replace("base", "")
+        candidate_norms.append(n_clean)
+        clean_lookup[n_clean] = c
+
+    if base_norm in clean_lookup:
+        return clean_lookup[base_norm]
+
+    matches = difflib.get_close_matches(base_norm, candidate_norms, n=1, cutoff=0.76)
+    return clean_lookup.get(matches[0], "") if matches else ""
 
 
-def apply_column_mapping(raw_df: pd.DataFrame, mapping: Dict[str, str]) -> pd.DataFrame:
-    # selected uploaded column -> standard required column
-    rename_dict = {uploaded: required for required, uploaded in mapping.items() if uploaded}
-    mapped = raw_df.rename(columns=rename_dict).copy()
-
-    # Keep only one copy if the source already had the target and a duplicate was created.
-    mapped = mapped.loc[:, ~mapped.columns.duplicated()].copy()
-    return mapped
+def read_excel_file(uploaded_file, sheet_name):
+    return pd.read_excel(uploaded_file, sheet_name=sheet_name)
 
 
 def is_missing_question_value(series: pd.Series) -> pd.Series:
@@ -188,11 +199,7 @@ def get_remaining_missing_summary(df: pd.DataFrame, question_cols: List[str]) ->
             continue
         missing_count = int(is_missing_question_value(df[col]).sum())
         if missing_count > 0:
-            rows.append({
-                "Question ID": col,
-                "Missing count": missing_count,
-                "Missing %": missing_count / len(df) if len(df) else 0
-            })
+            rows.append({"Question ID": col, "Missing count": missing_count, "Missing %": missing_count / len(df) if len(df) else 0})
     return pd.DataFrame(rows)
 
 
@@ -201,11 +208,9 @@ def apply_actions(df: pd.DataFrame, actions: Dict[str, str]) -> pd.DataFrame:
     for base_col, action in actions.items():
         post_col = f"{base_col}_post"
         target_cols = [c for c in [base_col, post_col] if c in out.columns]
-
         if action == "change missing to 0":
             for target in target_cols:
                 out[target] = out[target].replace({999: 0}).fillna(0)
-
         elif action == "drop this question":
             out = out.drop(columns=target_cols, errors="ignore")
     return out
@@ -220,18 +225,14 @@ def create_by_question(clean_df: pd.DataFrame, baseline_cols: List[str]) -> pd.D
         post_col = f"{base_col}_post"
         if base_col not in clean_df.columns or post_col not in clean_df.columns:
             continue
-
         base_numeric = pd.to_numeric(clean_df[base_col], errors="coerce")
         post_numeric = pd.to_numeric(clean_df[post_col], errors="coerce")
-
         out[base_col] = base_numeric
         out[post_col] = post_numeric
-
         comp_col = base_col.replace("_mark", "_mark_comparison")
         if comp_col == base_col:
             comp_col = f"{base_col}_comparison"
         out[comp_col] = post_numeric - base_numeric
-
         used_baseline_score_cols.append(base_col)
         used_endline_score_cols.append(post_col)
 
@@ -272,99 +273,271 @@ def go_back():
 
 
 def show_progress():
-    labels = ["1. Map Columns", "2. Review Rows", "3. Question Actions", "4. Download"]
+    labels = ["1. Upload Structure", "2. Map Columns", "3. Review Rows", "4. Question Actions", "5. Download"]
     current = st.session_state.step
     st.progress((current - 1) / (len(labels) - 1))
     st.write(" → ".join([f"**{x}**" if i + 1 == current else x for i, x in enumerate(labels)]))
 
 
+def selectbox_mapping(label: str, req_col: str, uploaded_cols: List[str], key: str, mapping: Dict[str, str], endline_hint: bool = False):
+    options = [""] + uploaded_cols
+    suggested = mapping.get(key, suggest_column(req_col, uploaded_cols, endline_hint=endline_hint))
+    index = options.index(suggested) if suggested in options else 0
+    mapping[key] = st.selectbox(label, options=options, index=index, key=f"map_{key}")
+
+
+def build_same_row_df(raw_df: pd.DataFrame, mapping: Dict[str, str]) -> pd.DataFrame:
+    rename = {uploaded: standard for standard, uploaded in mapping.items() if uploaded}
+    out = raw_df.rename(columns=rename).copy()
+    out = out.loc[:, ~out.columns.duplicated()].copy()
+    return out
+
+
+def build_two_file_df(base_df: pd.DataFrame, end_df: pd.DataFrame, mapping: Dict[str, str]) -> pd.DataFrame:
+    base_id_src = mapping["base_id"]
+    end_id_src = mapping["end_id"]
+
+    base_cols = {mapping[k]: k.replace("base_", "") for k in mapping if k.startswith("base_") and k not in ["base_id"] and mapping[k]}
+    end_cols = {mapping[k]: k.replace("end_", "") + "_post" for k in mapping if k.startswith("end_") and k not in ["end_id"] and mapping[k]}
+
+    base_keep = [base_id_src] + list(base_cols.keys())
+    end_keep = [end_id_src] + list(end_cols.keys())
+
+    base_part = base_df[base_keep].copy().rename(columns={base_id_src: "caseid", **base_cols})
+    end_part = end_df[end_keep].copy().rename(columns={end_id_src: "caseid", **end_cols})
+
+    base_part = base_part.drop_duplicates(subset=["caseid"], keep="first")
+    end_part = end_part.drop_duplicates(subset=["caseid"], keep="first")
+
+    return base_part.merge(end_part, on="caseid", how="inner")
+
+
+def build_duplicated_rows_df(raw_df: pd.DataFrame, mapping: Dict[str, str], baseline_value, endline_value) -> pd.DataFrame:
+    id_src = mapping["dup_id"]
+    round_src = mapping["round_col"]
+    data = raw_df.copy()
+    data["__round_text__"] = data[round_src].astype("string").str.strip().str.lower()
+    base_val = str(baseline_value).strip().lower()
+    end_val = str(endline_value).strip().lower()
+
+    baseline_raw = data[data["__round_text__"] == base_val].copy()
+    endline_raw = data[data["__round_text__"] == end_val].copy()
+
+    question_cols = {mapping[k]: k.replace("q_", "") for k in mapping if k.startswith("q_") and mapping[k]}
+    optional_cols = {mapping[k]: k.replace("meta_", "") for k in mapping if k.startswith("meta_") and mapping[k]}
+
+    base_keep = [id_src] + list(optional_cols.keys()) + list(question_cols.keys())
+    end_keep = [id_src] + list(question_cols.keys())
+
+    baseline_part = baseline_raw[base_keep].copy().rename(columns={id_src: "caseid", **optional_cols, **question_cols})
+    endline_part = endline_raw[end_keep].copy().rename(columns={id_src: "caseid", **{src: f"{std}_post" for src, std in question_cols.items()}})
+
+    baseline_part = baseline_part.drop_duplicates(subset=["caseid"], keep="first")
+    endline_part = endline_part.drop_duplicates(subset=["caseid"], keep="first")
+    return baseline_part.merge(endline_part, on="caseid", how="inner")
+
+
 init_state()
-
-uploaded_file = st.file_uploader("Upload Excel file", type=["xlsx", "xlsm", "xls"])
-
-if not uploaded_file:
-    st.info("Upload your Excel file to start.")
-    st.stop()
-
-xl = pd.ExcelFile(uploaded_file)
-sheet_name = st.selectbox("Select raw data sheet", xl.sheet_names)
-raw_df = pd.read_excel(uploaded_file, sheet_name=sheet_name)
-
 show_progress()
 st.divider()
 
-# STEP 1: Mapping
+# STEP 1: Upload structure and files
 if st.session_state.step == 1:
-    st.subheader("Step 1: Map uploaded columns to IDELA columns")
-    st.write("For each required IDELA column, choose the matching column from the uploaded file. Auto-detected matches are preselected.")
+    st.subheader("Step 1: Select upload structure")
+    upload_type = st.radio(
+        "How is your IDELA data uploaded?",
+        [
+            "One file: baseline and endline are in the same row",
+            "Two files: one baseline file and one endline file",
+            "One file: baseline and endline are duplicated rows",
+        ],
+        index=0,
+        key="upload_type_radio",
+    )
+    if upload_type != st.session_state.upload_type:
+        st.session_state.upload_type = upload_type
+        reset_after_upload_type_change()
 
-    uploaded_cols = list(raw_df.columns)
-    options = [""] + uploaded_cols
+    if upload_type.startswith("One file: baseline and endline are in the same row"):
+        uploaded_file = st.file_uploader("Upload Excel file", type=["xlsx", "xlsm", "xls"], key="same_file")
+        if uploaded_file:
+            xl = pd.ExcelFile(uploaded_file)
+            sheet_name = st.selectbox("Select raw data sheet", xl.sheet_names, key="same_sheet")
+            raw_df = read_excel_file(uploaded_file, sheet_name)
+            st.session_state.raw_df = raw_df
+            st.success(f"Loaded {len(raw_df)} rows and {len(raw_df.columns)} columns.")
+            st.dataframe(raw_df.head(10), use_container_width=True)
+            if st.button("Next: Map columns", type="primary"):
+                go_next()
 
-    tab_required, tab_optional, tab_preview = st.tabs(["Required questions", "Optional info columns", "Raw preview"])
+    elif upload_type.startswith("Two files"):
+        col1, col2 = st.columns(2)
+        with col1:
+            base_file = st.file_uploader("Upload baseline Excel file", type=["xlsx", "xlsm", "xls"], key="base_file")
+        with col2:
+            end_file = st.file_uploader("Upload endline Excel file", type=["xlsx", "xlsm", "xls"], key="end_file")
+        if base_file and end_file:
+            base_xl = pd.ExcelFile(base_file)
+            end_xl = pd.ExcelFile(end_file)
+            c1, c2 = st.columns(2)
+            with c1:
+                base_sheet = st.selectbox("Baseline sheet", base_xl.sheet_names, key="base_sheet")
+                base_df = read_excel_file(base_file, base_sheet)
+                st.write("Baseline preview")
+                st.dataframe(base_df.head(5), use_container_width=True)
+            with c2:
+                end_sheet = st.selectbox("Endline sheet", end_xl.sheet_names, key="end_sheet")
+                end_df = read_excel_file(end_file, end_sheet)
+                st.write("Endline preview")
+                st.dataframe(end_df.head(5), use_container_width=True)
+            st.session_state.base_df = base_df
+            st.session_state.end_df = end_df
+            if st.button("Next: Map columns", type="primary"):
+                go_next()
 
+    else:
+        uploaded_file = st.file_uploader("Upload Excel file with baseline/endline duplicated rows", type=["xlsx", "xlsm", "xls"], key="dup_file")
+        if uploaded_file:
+            xl = pd.ExcelFile(uploaded_file)
+            sheet_name = st.selectbox("Select raw data sheet", xl.sheet_names, key="dup_sheet")
+            raw_df = read_excel_file(uploaded_file, sheet_name)
+            st.session_state.raw_df = raw_df
+            st.success(f"Loaded {len(raw_df)} rows and {len(raw_df.columns)} columns.")
+            st.dataframe(raw_df.head(10), use_container_width=True)
+            if st.button("Next: Map columns", type="primary"):
+                go_next()
+
+# STEP 2: Mapping
+elif st.session_state.step == 2:
+    st.subheader("Step 2: Map columns")
+    upload_type = st.session_state.upload_type
     mapping = dict(st.session_state.column_mapping) if st.session_state.column_mapping else {}
 
-    with tab_required:
-        st.warning("You must map IDELA_date and all baseline/endline question columns before moving to the next step.")
-        for req_col in MANDATORY_COLS:
-            suggested = mapping.get(req_col, suggest_column(req_col, uploaded_cols))
-            index = options.index(suggested) if suggested in options else 0
-            mapping[req_col] = st.selectbox(
-                req_col,
-                options=options,
-                index=index,
-                key=f"map_required_{req_col}"
-            )
+    if upload_type.startswith("One file: baseline and endline are in the same row"):
+        raw_df = st.session_state.raw_df
+        uploaded_cols = list(raw_df.columns)
+        st.write("Map the uploaded columns into the standard IDELA format.")
+        tab_q, tab_meta, tab_preview = st.tabs(["Required question columns", "Optional info columns", "Preview"])
+        with tab_q:
+            st.warning("Map IDELA_date, all baseline question columns, and all endline/post question columns.")
+            selectbox_mapping("IDELA_date", "IDELA_date", uploaded_cols, "IDELA_date", mapping)
+            for base_col in BASELINE_QUESTION_COLS:
+                c1, c2 = st.columns(2)
+                with c1:
+                    selectbox_mapping(base_col, base_col, uploaded_cols, base_col, mapping)
+                with c2:
+                    post_col = f"{base_col}_post"
+                    selectbox_mapping(post_col, post_col, uploaded_cols, post_col, mapping, endline_hint=True)
+        with tab_meta:
+            for col in [c for c in META_COLUMNS if c != "IDELA_date"]:
+                selectbox_mapping(col, col, uploaded_cols, col, mapping)
+        with tab_preview:
+            st.dataframe(raw_df.head(20), use_container_width=True)
 
-    with tab_optional:
-        st.write("These columns are optional but recommended for the final output.")
-        optional_cols = [c for c in META_COLUMNS if c != "IDELA_date"]
-        for req_col in optional_cols:
-            suggested = mapping.get(req_col, suggest_column(req_col, uploaded_cols))
-            index = options.index(suggested) if suggested in options else 0
-            mapping[req_col] = st.selectbox(
-                req_col,
-                options=options,
-                index=index,
-                key=f"map_optional_{req_col}"
-            )
+        required_keys = ["IDELA_date"] + BASELINE_QUESTION_COLS + ENDLINE_QUESTION_COLS
 
-    with tab_preview:
-        st.dataframe(raw_df.head(20), use_container_width=True)
+        if st.button("Next: Review rows", type="primary"):
+            missing = [k for k in required_keys if not mapping.get(k)]
+            selected = [mapping.get(k, "") for k in required_keys if mapping.get(k)]
+            duplicates = sorted({x for x in selected if selected.count(x) > 1})
+            if missing:
+                st.error("Required columns still not mapped: " + ", ".join(missing))
+            elif duplicates:
+                st.error("Some uploaded columns are mapped more than once: " + ", ".join(duplicates))
+            else:
+                st.session_state.column_mapping = mapping
+                st.session_state.mapped_df = build_same_row_df(raw_df, mapping)
+                st.session_state.selected_delete_indices = set()
+                go_next()
+
+    elif upload_type.startswith("Two files"):
+        base_df = st.session_state.base_df
+        end_df = st.session_state.end_df
+        base_cols = list(base_df.columns)
+        end_cols = list(end_df.columns)
+        st.write("Map baseline columns from the baseline file, and endline columns from the endline file.")
+        tab_ids, tab_base, tab_end, tab_meta = st.tabs(["ID columns", "Baseline questions", "Endline questions", "Optional baseline info"])
+        with tab_ids:
+            selectbox_mapping("Baseline unique child/beneficiary ID", "caseid", base_cols, "base_id", mapping)
+            selectbox_mapping("Endline unique child/beneficiary ID", "caseid", end_cols, "end_id", mapping)
+        with tab_base:
+            selectbox_mapping("Baseline IDELA_date", "IDELA_date", base_cols, "base_IDELA_date", mapping)
+            for base_col in BASELINE_QUESTION_COLS:
+                selectbox_mapping(base_col, base_col, base_cols, f"base_{base_col}", mapping)
+        with tab_end:
+            for base_col in BASELINE_QUESTION_COLS:
+                selectbox_mapping(f"{base_col} / endline", base_col, end_cols, f"end_{base_col}", mapping, endline_hint=True)
+        with tab_meta:
+            for col in [c for c in META_COLUMNS if c not in ["caseid", "IDELA_date"]]:
+                selectbox_mapping(col, col, base_cols, f"base_{col}", mapping)
+
+        required_keys = ["base_id", "end_id", "base_IDELA_date"] + [f"base_{c}" for c in BASELINE_QUESTION_COLS] + [f"end_{c}" for c in BASELINE_QUESTION_COLS]
+        if st.button("Next: Review rows", type="primary"):
+            missing = [k for k in required_keys if not mapping.get(k)]
+            base_selected = [mapping.get(k, "") for k in required_keys if k.startswith("base_") and mapping.get(k)] + ([mapping.get("base_id")] if mapping.get("base_id") else [])
+            end_selected = [mapping.get(k, "") for k in required_keys if k.startswith("end_") and mapping.get(k)] + ([mapping.get("end_id")] if mapping.get("end_id") else [])
+            base_dups = sorted({x for x in base_selected if x and base_selected.count(x) > 1})
+            end_dups = sorted({x for x in end_selected if x and end_selected.count(x) > 1})
+            if missing:
+                st.error("Required columns still not mapped: " + ", ".join(missing))
+            elif base_dups or end_dups:
+                st.error("Duplicate mappings found. Baseline: " + ", ".join(base_dups) + " Endline: " + ", ".join(end_dups))
+            else:
+                st.session_state.column_mapping = mapping
+                st.session_state.mapped_df = build_two_file_df(base_df, end_df, mapping)
+                st.session_state.selected_delete_indices = set()
+                go_next()
+
+    else:
+        raw_df = st.session_state.raw_df
+        uploaded_cols = list(raw_df.columns)
+        st.write("Map the ID column, round column, then select which round value means baseline and endline.")
+        tab_setup, tab_q, tab_meta, tab_preview = st.tabs(["ID and round", "Question columns", "Optional info columns", "Preview"])
+        with tab_setup:
+            selectbox_mapping("Unique child/beneficiary ID", "caseid", uploaded_cols, "dup_id", mapping)
+            selectbox_mapping("Round/status column that says baseline/endline", "round", uploaded_cols, "round_col", mapping)
+            round_values = []
+            if mapping.get("round_col"):
+                round_values = sorted([str(x) for x in raw_df[mapping["round_col"]].dropna().unique().tolist()])
+            c1, c2 = st.columns(2)
+            with c1:
+                baseline_value = st.selectbox("Which value means baseline?", options=round_values, key="baseline_round_value") if round_values else None
+            with c2:
+                endline_value = st.selectbox("Which value means endline?", options=round_values, key="endline_round_value") if round_values else None
+        with tab_q:
+            for base_col in BASELINE_QUESTION_COLS:
+                selectbox_mapping(base_col, base_col, uploaded_cols, f"q_{base_col}", mapping)
+        with tab_meta:
+            selectbox_mapping("IDELA_date", "IDELA_date", uploaded_cols, "meta_IDELA_date", mapping)
+            for col in [c for c in META_COLUMNS if c not in ["caseid", "IDELA_date"]]:
+                selectbox_mapping(col, col, uploaded_cols, f"meta_{col}", mapping)
+        with tab_preview:
+            st.dataframe(raw_df.head(20), use_container_width=True)
+
+        required_keys = ["dup_id", "round_col", "meta_IDELA_date"] + [f"q_{c}" for c in BASELINE_QUESTION_COLS]
+        if st.button("Next: Review rows", type="primary"):
+            missing = [k for k in required_keys if not mapping.get(k)]
+            selected = [mapping.get(k, "") for k in required_keys if mapping.get(k)]
+            duplicates = sorted({x for x in selected if x and selected.count(x) > 1})
+            if missing:
+                st.error("Required columns still not mapped: " + ", ".join(missing))
+            elif not baseline_value or not endline_value or baseline_value == endline_value:
+                st.error("Select different baseline and endline values from the round column.")
+            elif duplicates:
+                st.error("Some uploaded columns are mapped more than once: " + ", ".join(duplicates))
+            else:
+                st.session_state.column_mapping = mapping
+                st.session_state.mapped_df = build_duplicated_rows_df(raw_df, mapping, baseline_value, endline_value)
+                st.session_state.selected_delete_indices = set()
+                go_next()
 
     st.session_state.column_mapping = mapping
+    if st.button("Back"):
+        go_back()
 
-    selected_required = [mapping.get(c, "") for c in MANDATORY_COLS]
-    missing_required = [c for c in MANDATORY_COLS if not mapping.get(c)]
-    duplicate_selected = sorted({x for x in selected_required if x and selected_required.count(x) > 1})
-
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Uploaded columns", len(uploaded_cols))
-    c2.metric("Required not mapped", len(missing_required))
-    c3.metric("Duplicate mappings", len(duplicate_selected))
-
-    if missing_required:
-        with st.expander("Required columns still not mapped"):
-            st.write(missing_required)
-
-    if duplicate_selected:
-        st.error("Some uploaded columns are mapped more than once. Fix these before continuing: " + ", ".join(duplicate_selected))
-
-    if st.button("Next: Review rows", type="primary"):
-        if missing_required:
-            st.error("Please map all required IDELA_date and question columns before continuing.")
-        elif duplicate_selected:
-            st.error("Please remove duplicate mappings before continuing.")
-        else:
-            mapped_df = apply_column_mapping(raw_df, mapping)
-            st.session_state.mapped_df = mapped_df
-            st.session_state.selected_delete_indices = set()
-            go_next()
-
-# STEP 2: Row review
-elif st.session_state.step == 2:
-    st.subheader("Step 2: Review rows with high missing percentage")
+# STEP 3: Row review
+elif st.session_state.step == 3:
+    st.subheader("Step 3: Review rows with high missing percentage")
     mapped_df = st.session_state.mapped_df.copy()
 
     if "IDELA_date" not in mapped_df.columns:
@@ -381,8 +554,7 @@ elif st.session_state.step == 2:
     filtered_df.insert(2, "endline missing %", missing_pct(filtered_df, ENDLINE_QUESTION_COLS))
     st.session_state.filtered_df = filtered_df
 
-    st.write(f"Rows kept after IDELA_date validation: **{len(filtered_df)}**")
-
+    st.write(f"Rows after merge and IDELA_date validation: **{len(filtered_df)}**")
     high_missing = filtered_df[(filtered_df["baseline missing %"] > 0.30) | (filtered_df["endline missing %"] > 0.30)].copy()
     st.warning(f"Rows with baseline or endline missing above 30%: {len(high_missing)}")
 
@@ -391,7 +563,6 @@ elif st.session_state.step == 2:
         high_missing_display = high_missing.copy()
         high_missing_display["baseline missing %"] *= 100
         high_missing_display["endline missing %"] *= 100
-
         display_cols = [c for c in ["caseid", "d_childs_full_name", "child_name", "student_name", "e_childs_sex", "f_childs_age", "teacher_location"] if c in high_missing_display.columns]
         display_cols += ["baseline missing %", "endline missing %"]
 
@@ -401,7 +572,6 @@ elif st.session_state.step == 2:
         total_pages = max(1, (len(high_missing_display) - 1) // page_size + 1)
         with c2:
             page = st.number_input("Page", min_value=1, max_value=total_pages, value=1, step=1)
-
         start = (page - 1) * page_size
         end = start + page_size
         page_df = high_missing_display.iloc[start:end].copy()
@@ -415,7 +585,6 @@ elif st.session_state.step == 2:
             if st.button("Clear this page"):
                 st.session_state.selected_delete_indices -= current_page_indices
                 st.rerun()
-
         c5, c6 = st.columns(2)
         with c5:
             if st.button("Select ALL high-missing rows"):
@@ -437,7 +606,6 @@ elif st.session_state.step == 2:
                 "endline missing %": st.column_config.NumberColumn("endline missing %", format="%.1f%%"),
             },
         )
-
         selected_on_page = set(edited_page.index[edited_page["Select Delete"] == True].tolist())
         st.session_state.selected_delete_indices -= current_page_indices
         st.session_state.selected_delete_indices |= selected_on_page
@@ -456,9 +624,9 @@ elif st.session_state.step == 2:
         if st.button("Next: Question actions", type="primary"):
             go_next()
 
-# STEP 3: Question actions
-elif st.session_state.step == 3:
-    st.subheader("Step 3: Question Missing Review and Actions")
+# STEP 4: Question actions
+elif st.session_state.step == 4:
+    st.subheader("Step 4: Question Missing Review and Actions")
     clean_base = st.session_state.clean_base.copy()
     action_options = ["No action", "change missing to 0", "drop this question"]
 
@@ -496,7 +664,7 @@ elif st.session_state.step == 3:
     )
 
     st.session_state.actions = dict(zip(edited_actions["Baseline ID"], edited_actions["Action"]))
-    st.info("If you choose 'drop this question', both the baseline question and its matching post/endline question are removed.")
+    st.info("If you choose 'drop this question', both the baseline question and its matching endline question are removed.")
 
     c1, c2 = st.columns(2)
     with c1:
@@ -506,9 +674,9 @@ elif st.session_state.step == 3:
         if st.button("Next: Download", type="primary"):
             go_next()
 
-# STEP 4: Download
-elif st.session_state.step == 4:
-    st.subheader("Step 4: Preview and Download")
+# STEP 5: Download
+elif st.session_state.step == 5:
+    st.subheader("Step 5: Preview and Download")
     clean_base = st.session_state.clean_base.copy()
     filtered_df = st.session_state.filtered_df.copy()
     actions = st.session_state.actions
@@ -525,7 +693,7 @@ elif st.session_state.step == 4:
     if len(remaining_missing_summary) > 0:
         missing_columns = sorted(remaining_missing_summary["Question ID"].tolist())
         st.error("Download is blocked. Missing is still in these columns:\n\n" + "\n".join(missing_columns))
-        st.warning("Go back to Step 3 and choose an action for these question columns, such as changing missing to 0 or dropping the question.")
+        st.warning("Go back to Step 4 and choose an action for these question columns, such as changing missing to 0 or dropping the question.")
     else:
         sheets = {
             "filtered on Idela": filtered_df,
