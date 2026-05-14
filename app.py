@@ -19,6 +19,83 @@ META_COLUMNS = [
     "nationality", "district", "governorate", "sub_district"
 ]
 
+QUESTION_LABELS = {
+    "i1a_name_mark": "هل يمكنك أن تخبرني باسمك الأول واسم عائلتك؟ | Can you tell me your first and last/surname name?",
+    "i1a_age_mark": "هل يمكنك أن تخبرني عن عمرك؟ | Can you tell me how old you are?",
+    "i1a_sex_mark": "هل أنت صبي أم فتاة؟ | Are you a boy or a girl?",
+    "i1a_caregiver_mark": "أخبرني باسم شخص واحد يعتني بك | Please tell me the name of one person who takes care of you",
+    "i1a_neighborhood_mark": "اسم الحي/المجتمع/القرية التي تعيش فيها | Can you tell me the name of the neighborhood/community/village that you live in?",
+    "i1a_state_mark": "اسم الولاية/الدولة التي تعيش فيها | Can you tell me the name of the state/country that you live in?",
+    "i1a_country_mark": "هل من الممكن أن تخبرني عن اسم البلد أو المدينة التي تعيش به الآن؟ | Can you tell me the name of the state/country that you live in?",
+    "country_from_mark": "من الممكن ان تخبرني عن اسم البلد الذي اتو منه اهلك؟ | Can you tell me the name of the state/country that you live in?",
+    "i2a_biggest_circle_mark": "يحدد الدائرة الأكبر | Child identifies biggest circle",
+    "i2b_smallest_circle_mark": "يحدد الدائرة الأصغر | Child identifies smallest circle",
+    "i2c_longest_stick_mark": "يحدد العصا الأطول | Child identifies longest stick",
+    "i2d_shortest_stick_mark": "يحدد العصا الأقصر | Child identifies shortest stick",
+    "i3_sort_criterion1_mark": "صنف الطفل البطاقات حسب اللون أو الشكل/ طريقة واحدة فقط | Child sorts cards by first criterion",
+    "i3_sort_criterion2_mark": "صنف الطفل البطاقات حسب اللون أو الشكل/ طريقة ثانية فقط | Child sorts cards by second criterion",
+    "i4_circle_mark": "يتعرف على الدائرة | Child identifies circle",
+    "i4_rectangle_mark": "يتعرف على المستطيل | Child identifies rectangle",
+    "i4_triangle_mark": "يتعرف على المثلث | Child identifies triangle",
+    "i4_square_mark": "يتعرف على المربع | Child identifies square",
+    "i4_circle_env_mark": "حدد الطفل شيء يشبه الدائرة من محيطه | Child identifies circle in the environment",
+    "i5_row12_correct_count": "الصفوف 1-2: عدد الأرقام الصحيحة (0-10) | Rows 1-2: Number of correct numbers (0-10)",
+    "i5_row34_correct_count": "الصفوف 3-4: عدد الأرقام الصحيحة (0-10) | Rows 3-4: Number of correct numbers (0-10)",
+    "i6_give3_mark": "يحدد 3 عناصر | Child identifies 3 items",
+    "i6_give5_mark": "يحدد 5 عناصر | Child identifies 5 items",
+    "i6_give8_mark": "يحدد 8 عناصر | Child identifies 8 items",
+    "i6_focus_mark": "يظل مركزًا على المهمة؛ لا يتشتت بسهولة | Child stays concentrated on the task at hand; not easily distracted",
+    "i6_eager_mark": "متحمس لإنجاز المهمة؛ لا يريد التوقف | Child is motivated to complete task; does not want to stop the task.",
+    "i7_add3_2_mark": "يضيف 3 و 2 | Child adds 3 and 2",
+    "i7_add2_2_mark": "يضيف 2 و 2 | Child adds 2 and 2",
+    "i7_subtract1_from3_mark": "يطرح 1 من 3 | Child subtracts 1 from 3",
+    "i8_friends_count": "عدد الأصدقاء المذكورين (0-10) | Number of friends named (0-10)",
+    "i9_sad_trigger_mark": "يحدد شيئًا يجعله حزينًا | Child identifies something that makes them sad",
+    "i9_regulate1_mark": "يعطي إجابة واحدة للتعامل مع الحزن | Child gives one response on dealing with sad feeling",
+    "i9_regulate2_mark": "يعطي إجابة ثانية للتعامل مع الحزن | Child gives another response on dealing with sad feeling",
+    "i9_happy_trigger_mark": "يحدد شيئًا يجعله سعيدًا | Child identifies something that makes them happy",
+    "i10_understands_feeling_mark": "الطفل يدرك أن صديقه يشعر بالحزن/الألم/الضيق | Child identifies that friend is feeling sad/hurt/upset",
+    "i10_help1_mark": "الطفل يعطي إجابة واحدة عن كيفية جعل صديقه يشعر بتحسن | Child gives one response for how to make friend feel better",
+    "i10_help2_mark": "الطفل يعطي إجابة ثانية عن كيفية جعل صديقه يشعر بتحسن | Child gives second response for how to make friend feel better",
+    "i11_conflict1_mark": "يعطي الطفل إجابة واحدة عن كيفية حل النزاع | Child gives one response for how to solve conflict",
+    "i11_conflict2_mark": "يعطي الطفل إجابة ثانية عن كيفية حل النزاع | Child gives second response for how to solve conflict",
+    "i12_seq1_mark": "سلسله الأرقام 1…6 | numbers sequence 1…6",
+    "i12_seq2_mark": "5…2…9 سلسله الأرقام | numbers sequence 5…2…9",
+    "i12_seq3_mark": "8…3…1…4 سلسله الأرقام | numbers sequence 8…3…1…4",
+    "i12_seq4_mark": "1…2…4…7…3 سلسله الأرقام | numbers sequence 1…2…4…7…3",
+    "i13_market_items_count": "عدد عناصر السوق المذكورة (0-10) | Number of market items named (0-10)",
+    "i13_animals_count": "عدد الحيوانات المذكورة (0-10) | Number of animals named (0-10)",
+    "i14_open_book_mark": "يفتح الطفل الكتاب بشكل صحيح | Child opens the book appropriately",
+    "i14_point_text_mark": "يشير الطفل إلى النص الموجود على الصفحة | Child points to text on the page",
+    "i14_text_direction_mark": "أشار الطفل الطريقة الصحيحة في القراءة | Child shows direction of text",
+    "i15_row12_letters_count": "الصفوف 1-2: عدد الحروف الصحيحة | Rows 1-2: Number of correct letters",
+    "i15_row34_letters_count": "الصفوف 3-4: عدد الحروف الصحيحة | Rows 3-4: Number of correct letters",
+    "i16_s_pair_mark": "التعرف على زوج الأصوات /ب/ | Child identifies /s/ word pair",
+    "i16_t_pair_mark": "التعرف على زوج الأصوات /س/ | Child identifies /t/ word pair",
+    "i16_c_pair_mark": "التعرف على زوج الأصوات /ت/ | Child identifies /c/ word pair",
+    "i17_writing_level": "مستوى الكتابة (0-4) | Writing level (0-4)",
+    "i18_mouse_stole_hat_mark": "من سرق قبعة القطة؟ (الفأر) | Who stole the cat's hat? (the mouse)",
+    "i18_hat_color_mark": "لون القبعة (أحمر) | Can you tell me the color of the hat? (red)",
+    "i18_why_chased_mark": "لماذا طاردت القطة الفأر؟ | Why did the cat chase the mouse?",
+    "i18_where_trapped_mark": "أين حوصر الفأر؟ | Where did the mouse get trapped?",
+    "i18_why_spared_mark": "لماذا لم تأكل القطة الفأر؟ | Why did the cat spare/not eat the mouse?",
+    "i18_focus_mark": "يظل مركزًا على المهمة؛ لا يتشتت بسهولة | Child stays concentrated on the task at hand; not easily distracted",
+    "i18_eager_mark": "متحمس لإنجاز المهمة؛ لا يريد التوقف | Child is motivated to complete task; does not want to stop the task.",
+    "i19_closed_corners": "عدد الزوايا المغلقة بدون فجوات (0-3) | Number of closed corners, no gaps (0, 1, 2, 3)",
+    "i19_exited_mark": "الطفل متحمس لإتمام المهمة، لا يريد أن يتوقف عن العمل | The child is excited to complete the task and does not want to stop working.",
+    "i20_head_mark": "يرسم رأسًا | Child draws a head",
+    "i20_torso_mark": "يرسم جذعًا/جسمًا | Child draws a trunk/body",
+    "i20_arms_mark": "يرسم الذراعين | Child draws arms",
+    "i20_legs_mark": "يرسم الساقين | Child draws legs",
+    "i20_face1_mark": "يرسم سمة واحدة من سمات الوجه | Child draws 1 facial feature",
+    "i20_face2_mark": "يرسم سمتين من سمات الوجه | Child draws 2 facial features",
+    "i20_hands_mark": "يرسم اليدين | Child draws hands",
+    "i20_feet_mark": "يرسم القدمين | Child draws feet",
+    "i20_focus_mark": "يبقى مركزًا على المهمة؛ لا يتشتت بسهولة | Child stays concentrated on the task at hand; not easily distracted",
+    "i20_eager_mark": "متحمس لإنجاز المهمة؛ لا يريد التوقف | Child is motivated to complete task; does not want to stop the task.",
+    "i21_steps": "عدد الخطوات التي قفزها (بحد أقصى 10) | Number of steps hopped (Maximum 10 steps.)",
+}
+
 
 def find_range_columns(df: pd.DataFrame, start_col: str, end_col: str) -> List[str]:
     cols = list(df.columns)
@@ -164,8 +241,19 @@ if uploaded_file:
         high_missing_display["endline missing %"] = high_missing_display["endline missing %"] * 100
 
         display_cols = []
-        if "caseid" in high_missing_display.columns:
-            display_cols.append("caseid")
+        important_cols = [
+            "caseid",
+            "d_childs_full_name",
+            "child_name",
+            "student_name",
+            "e_childs_sex",
+            "f_childs_age",
+            "teacher_location",
+        ]
+        for col in important_cols:
+            if col in high_missing_display.columns:
+                display_cols.append(col)
+
         display_cols += ["baseline missing %", "endline missing %"]
 
         c1, c2, c3, c4 = st.columns(4)
@@ -258,10 +346,14 @@ if uploaded_file:
         question_review_rows = []
         for base_col in baseline_cols:
             post_col = f"{base_col}_post"
+            question_name = QUESTION_LABELS.get(base_col, base_col)
+
             question_review_rows.append({
-                "Baseline Question": base_col,
+                "Baseline Code": base_col,
+                "Baseline Question Name": question_name,
                 "Baseline Missing %": question_missing_pct(clean_base, base_col),
-                "Endline Question": post_col if post_col in clean_base.columns else "",
+                "Endline Code": post_col if post_col in clean_base.columns else "",
+                "Endline Question Name": question_name if post_col in clean_base.columns else "",
                 "Endline Missing %": question_missing_pct(clean_base, post_col) if post_col in clean_base.columns else 0.0,
                 "Action": "No action"
             })
@@ -271,12 +363,16 @@ if uploaded_file:
         edited_actions = st.data_editor(
             question_review_df,
             column_config={
+                "Baseline Code": st.column_config.TextColumn("Baseline Code", disabled=True),
+                "Baseline Question Name": st.column_config.TextColumn("Baseline Question Name", disabled=True),
                 "Baseline Missing %": st.column_config.ProgressColumn(
                     "Baseline Missing %",
                     format="%.1f%%",
                     min_value=0,
                     max_value=1
                 ),
+                "Endline Code": st.column_config.TextColumn("Endline Code", disabled=True),
+                "Endline Question Name": st.column_config.TextColumn("Endline Question Name", disabled=True),
                 "Endline Missing %": st.column_config.ProgressColumn(
                     "Endline Missing %",
                     format="%.1f%%",
@@ -289,11 +385,20 @@ if uploaded_file:
                     required=True
                 )
             },
+            disabled=[
+                "Baseline Code",
+                "Baseline Question Name",
+                "Baseline Missing %",
+                "Endline Code",
+                "Endline Question Name",
+                "Endline Missing %",
+            ],
             hide_index=True,
-            use_container_width=True
+            use_container_width=True,
+            key="question_action_editor"
         )
 
-        actions = dict(zip(edited_actions["Baseline Question"], edited_actions["Action"]))
+        actions = dict(zip(edited_actions["Baseline Code"], edited_actions["Action"]))
 
         st.info("If you choose 'drop this question', both the baseline question and its matching post/endline question are removed.")
 
