@@ -98,6 +98,17 @@ BASELINE_QUESTION_COLS = list(QUESTION_LABELS.keys())
 ENDLINE_QUESTION_COLS = [f"{c}_post" for c in BASELINE_QUESTION_COLS]
 
 
+def question_mapping_label(question_col: str) -> str:
+    """Show question IDs with English and Arabic descriptions during mapping."""
+    base_col = question_col.replace("_post", "")
+    label = QUESTION_LABELS.get(base_col, base_col)
+    if " | " in label:
+        arabic, english = label.split(" | ", 1)
+        return f"{question_col} — {english.strip()} | {arabic.strip()}"
+    return f"{question_col} — {label}"
+
+
+
 def init_state():
     defaults = {
         "step": 1,
@@ -503,10 +514,10 @@ elif st.session_state.step == 2:
             for base_col in BASELINE_QUESTION_COLS:
                 c1, c2 = st.columns(2)
                 with c1:
-                    selectbox_mapping(base_col, base_col, uploaded_cols, base_col, mapping)
+                    selectbox_mapping(question_mapping_label(base_col), base_col, uploaded_cols, base_col, mapping)
                 with c2:
                     post_col = f"{base_col}_post"
-                    selectbox_mapping(post_col, post_col, uploaded_cols, post_col, mapping, endline_hint=True)
+                    selectbox_mapping(question_mapping_label(post_col), post_col, uploaded_cols, post_col, mapping, endline_hint=True)
         with tab_preview:
             st.dataframe(raw_df.head(20), use_container_width=True)
 
@@ -543,10 +554,10 @@ elif st.session_state.step == 2:
                 selectbox_mapping(col, col, base_cols, f"base_{col}", mapping)
         with tab_base:
             for base_col in BASELINE_QUESTION_COLS:
-                selectbox_mapping(base_col, base_col, base_cols, f"base_{base_col}", mapping)
+                selectbox_mapping(question_mapping_label(base_col), base_col, base_cols, f"base_{base_col}", mapping)
         with tab_end:
             for base_col in BASELINE_QUESTION_COLS:
-                selectbox_mapping(f"{base_col} / endline", base_col, end_cols, f"end_{base_col}", mapping, endline_hint=True)
+                selectbox_mapping(question_mapping_label(f"{base_col}_post"), base_col, end_cols, f"end_{base_col}", mapping, endline_hint=True)
 
         required_keys = ["base_id", "end_id", "base_IDELA_date"] + [f"base_{c}" for c in META_COLUMNS if c not in ["caseid", "IDELA_date"]] + [f"base_{c}" for c in BASELINE_QUESTION_COLS] + [f"end_{c}" for c in BASELINE_QUESTION_COLS]
         if st.button("Next: Score text values", type="primary"):
@@ -583,7 +594,7 @@ elif st.session_state.step == 2:
                 endline_value = st.selectbox("Which value means endline?", options=round_values, key="endline_round_value") if round_values else None
         with tab_q:
             for base_col in BASELINE_QUESTION_COLS:
-                selectbox_mapping(base_col, base_col, uploaded_cols, f"q_{base_col}", mapping)
+                selectbox_mapping(question_mapping_label(base_col), base_col, uploaded_cols, f"q_{base_col}", mapping)
         with tab_meta:
             st.warning("Map these essential info columns. Any other uploaded columns will be discarded.")
             selectbox_mapping("IDELA_date", "IDELA_date", uploaded_cols, "meta_IDELA_date", mapping)
