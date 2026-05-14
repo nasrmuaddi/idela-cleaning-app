@@ -347,14 +347,18 @@ if uploaded_file:
         for base_col in baseline_cols:
             post_col = f"{base_col}_post"
             question_name = QUESTION_LABELS.get(base_col, base_col)
+            if " | " in question_name:
+                arabic_name, english_name = question_name.split(" | ", 1)
+            else:
+                arabic_name, english_name = "", question_name
 
             question_review_rows.append({
-                "Baseline Code": base_col,
-                "Baseline Question Name": question_name,
-                "Baseline Missing %": question_missing_pct(clean_base, base_col),
-                "Endline Code": post_col if post_col in clean_base.columns else "",
-                "Endline Question Name": question_name if post_col in clean_base.columns else "",
-                "Endline Missing %": question_missing_pct(clean_base, post_col) if post_col in clean_base.columns else 0.0,
+                "Baseline ID": base_col,
+                "Endline ID": post_col if post_col in clean_base.columns else "",
+                "Arabic": arabic_name,
+                "English": english_name,
+                "% Missing Baseline": question_missing_pct(clean_base, base_col),
+                "% Missing Endline": question_missing_pct(clean_base, post_col) if post_col in clean_base.columns else 0.0,
                 "Action": "No action"
             })
 
@@ -363,18 +367,18 @@ if uploaded_file:
         edited_actions = st.data_editor(
             question_review_df,
             column_config={
-                "Baseline Code": st.column_config.TextColumn("Baseline Code", disabled=True),
-                "Baseline Question Name": st.column_config.TextColumn("Baseline Question Name", disabled=True),
-                "Baseline Missing %": st.column_config.ProgressColumn(
-                    "Baseline Missing %",
+                "Baseline ID": st.column_config.TextColumn("Baseline ID", disabled=True),
+                "Endline ID": st.column_config.TextColumn("Endline ID", disabled=True),
+                "Arabic": st.column_config.TextColumn("Arabic", disabled=True),
+                "English": st.column_config.TextColumn("English", disabled=True),
+                "% Missing Baseline": st.column_config.ProgressColumn(
+                    "% Missing Baseline",
                     format="%.1f%%",
                     min_value=0,
                     max_value=1
                 ),
-                "Endline Code": st.column_config.TextColumn("Endline Code", disabled=True),
-                "Endline Question Name": st.column_config.TextColumn("Endline Question Name", disabled=True),
-                "Endline Missing %": st.column_config.ProgressColumn(
-                    "Endline Missing %",
+                "% Missing Endline": st.column_config.ProgressColumn(
+                    "% Missing Endline",
                     format="%.1f%%",
                     min_value=0,
                     max_value=1
@@ -386,19 +390,19 @@ if uploaded_file:
                 )
             },
             disabled=[
-                "Baseline Code",
-                "Baseline Question Name",
-                "Baseline Missing %",
-                "Endline Code",
-                "Endline Question Name",
-                "Endline Missing %",
+                "Baseline ID",
+                "Endline ID",
+                "Arabic",
+                "English",
+                "% Missing Baseline",
+                "% Missing Endline",
             ],
             hide_index=True,
             use_container_width=True,
             key="question_action_editor"
         )
 
-        actions = dict(zip(edited_actions["Baseline Code"], edited_actions["Action"]))
+        actions = dict(zip(edited_actions["Baseline ID"], edited_actions["Action"]))
 
         st.info("If you choose 'drop this question', both the baseline question and its matching post/endline question are removed.")
 
