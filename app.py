@@ -1047,6 +1047,14 @@ elif st.session_state.step == 3:
                     st.dataframe(remaining_unscored, use_container_width=True)
                 else:
                     st.session_state.scored_df = scored_df
+                    # Important: reset row deletions and question actions whenever scoring is re-applied.
+                    # Otherwise old selections from a previous run can leave only a few rows in Step 5,
+                    # which makes missing percentages look like 33.3% / 66.7% incorrectly.
+                    st.session_state.selected_delete_indices = set()
+                    st.session_state.filtered_df = None
+                    st.session_state.clean_base = None
+                    st.session_state.actions = {}
+                    st.session_state.actions_confirmed = False
                     go_next()
 
 # STEP 4: Row review
@@ -1136,12 +1144,17 @@ elif st.session_state.step == 4:
             go_back()
     with c2:
         if st.button("Next: Question actions", type="primary"):
+            # Recalculate default question actions fresh from the final row set.
+            # This prevents previous/default choices from staying when the data changes.
+            st.session_state.actions = {}
+            st.session_state.actions_confirmed = False
             go_next()
 
 # STEP 5: Question actions
 elif st.session_state.step == 5:
     st.subheader("Step 5: Question Missing Review and Actions")
     clean_base = st.session_state.clean_base.copy()
+    st.info(f"Question missing percentages are calculated using **{len(clean_base)} cleaned rows** after Step 4 row deletion.")
 
     action_options = ["change missing to 0", "drop this question"]
 
