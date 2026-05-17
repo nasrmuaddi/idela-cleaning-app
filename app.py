@@ -867,13 +867,29 @@ elif st.session_state.step == 5:
 
     question_review_df = pd.DataFrame(question_review_rows)
 
-    # Enforce default drop for questions with >=30% missing unless user manually changes later.
+    # Enforce valid default action for EVERY question. This prevents blank action cells.
     high_missing_questions = question_review_df.loc[question_review_df["High Missing"].eq("YES"), "Baseline ID"].tolist()
+    valid_actions = set(action_options)
+
+    for _, r in question_review_df.iterrows():
+        q = r["Baseline ID"]
+        default_action = "drop this question" if r["High Missing"] == "YES" else "change missing to 0"
+        current_action = st.session_state.actions.get(q)
+        if current_action not in valid_actions:
+            st.session_state.actions[q] = default_action
+
+    # Force high-missing questions to default to drop the first time they appear.
+    # The user can still change them manually after this.
     if "high_missing_default_applied" not in st.session_state:
         st.session_state.high_missing_default_applied = True
         for q in high_missing_questions:
             st.session_state.actions[q] = "drop this question"
-        question_review_df["Action"] = question_review_df["Baseline ID"].map(st.session_state.actions)
+
+    question_review_df["Action"] = question_review_df["Baseline ID"].map(st.session_state.actions)
+    question_review_df["Action"] = question_review_df.apply(
+        lambda r: r["Action"] if r["Action"] in valid_actions else ("drop this question" if r["High Missing"] == "YES" else "change missing to 0"),
+        axis=1
+    )
 
     def highlight_high_missing(row):
         if row["High Missing"] == "YES":
@@ -900,6 +916,11 @@ elif st.session_state.step == 5:
         key="question_action_editor_v2",
     )
 
+    # Save edited actions, filling any blank/invalid cells with the correct default.
+    edited_actions["Action"] = edited_actions.apply(
+        lambda r: r["Action"] if r["Action"] in valid_actions else ("drop this question" if r["High Missing"] == "YES" else "change missing to 0"),
+        axis=1
+    )
     st.session_state.actions = dict(zip(edited_actions["Baseline ID"], edited_actions["Action"]))
 
     dropped_questions = edited_actions.loc[edited_actions["Action"].eq("drop this question"), ["Baseline ID", "Endline ID", "English", "Arabic"]].copy()
