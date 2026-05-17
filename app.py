@@ -229,6 +229,12 @@ def question_excel_name(base_col: str, language: str = "both") -> str:
     return f"{english} | {arabic}"
 
 
+def comparison_status(series: pd.Series) -> pd.Series:
+    """Convert numeric comparison values to Improved / Decreased / No change."""
+    numeric = pd.to_numeric(series, errors="coerce")
+    return numeric.apply(lambda x: "Improved" if x > 0 else ("Decreased" if x < 0 else "No change"))
+
+
 def init_state():
     defaults = {
         "step": 1,
@@ -551,7 +557,9 @@ def create_by_question(clean_df: pd.DataFrame, baseline_cols: List[str]) -> pd.D
 
         out[f"{question_name} - baseline"] = base_numeric
         out[f"{question_name} - endline"] = post_numeric
-        out[f"{question_name} - comparison"] = post_numeric - base_numeric
+        comp_col = f"{question_name} - comparison"
+        out[comp_col] = post_numeric - base_numeric
+        out[f"{question_name} - comparison status"] = comparison_status(out[comp_col])
 
         used_baseline_score_cols.append(base_col)
         used_endline_score_cols.append(post_col)
@@ -559,6 +567,7 @@ def create_by_question(clean_df: pd.DataFrame, baseline_cols: List[str]) -> pd.D
     out["baseline idela score"] = clean_df[used_baseline_score_cols].apply(pd.to_numeric, errors="coerce").sum(axis=1) if used_baseline_score_cols else 0
     out["endline idela score"] = clean_df[used_endline_score_cols].apply(pd.to_numeric, errors="coerce").sum(axis=1) if used_endline_score_cols else 0
     out["idela score"] = out["endline idela score"] - out["baseline idela score"]
+    out["idela score status"] = comparison_status(out["idela score"])
     return out
 
 
@@ -590,12 +599,14 @@ def create_by_item(clean_df: pd.DataFrame) -> pd.DataFrame:
             out[end_col_name] = 0
 
         out[comp_col_name] = out[end_col_name] - out[base_col_name]
+        out[f"{item_id} {item_name} comparison status"] = comparison_status(out[comp_col_name])
         item_score_cols_base.append(base_col_name)
         item_score_cols_end.append(end_col_name)
 
     out["baseline idela score"] = out[item_score_cols_base].sum(axis=1) if item_score_cols_base else 0
     out["endline idela score"] = out[item_score_cols_end].sum(axis=1) if item_score_cols_end else 0
     out["idela score"] = out["endline idela score"] - out["baseline idela score"]
+    out["idela score status"] = comparison_status(out["idela score"])
     return out
 
 
@@ -624,6 +635,7 @@ def create_by_domain(by_item_df: pd.DataFrame) -> pd.DataFrame:
         out[base_domain_col] = by_item_df[item_base_cols].sum(axis=1) if item_base_cols else 0
         out[end_domain_col] = by_item_df[item_end_cols].sum(axis=1) if item_end_cols else 0
         out[comp_domain_col] = out[end_domain_col] - out[base_domain_col]
+        out[f"{domain_name} comparison status"] = comparison_status(out[comp_domain_col])
 
         domain_base_cols.append(base_domain_col)
         domain_end_cols.append(end_domain_col)
@@ -631,6 +643,7 @@ def create_by_domain(by_item_df: pd.DataFrame) -> pd.DataFrame:
     out["baseline idela score"] = out[domain_base_cols].sum(axis=1) if domain_base_cols else 0
     out["endline idela score"] = out[domain_end_cols].sum(axis=1) if domain_end_cols else 0
     out["idela score"] = out["endline idela score"] - out["baseline idela score"]
+    out["idela score status"] = comparison_status(out["idela score"])
     return out
 
 
@@ -705,6 +718,115 @@ def keep_standard_columns(df: pd.DataFrame) -> pd.DataFrame:
     keep_cols = [c for c in standard_output_columns() if c in df.columns]
     return df[keep_cols].copy()
 
+
+
+def validate_paired_rows(mapped_df: pd.DataFrame, expected_min_rows: int = 10):
+    """Return (ok, message). Prevent wrong missing percentages caused by merging on the wrong ID column."""
+    row_count = len(mapped_df) if mapped_df is not None else 0
+    if row_count == 0:
+        return False, "No paired baseline/endline rows were created. Please check the unique child/beneficiary ID mapping."
+    if row_count < expected_min_rows:
+        return False, (
+            f"Only {row_count} paired baseline/endline rows were created. This is usually because the wrong ID column was selected. "
+            "For duplicated baseline/endline files, do NOT use row number. Use the real child/case ID, usually `form.case.@case_id`."
+        )
+    return True, ""
+
+
+def duplicated_pairing_summary(raw_df: pd.DataFrame, id_col: str, round_col: str, baseline_value, endline_value):
+    data = raw_df.copy()
+    rt = data[round_col].astype('string').str.strip().str.lower()
+    base_val = str(baseline_value).strip().lower()
+    end_val = str(endline_value).strip().lower()
+    base_ids = set(data.loc[rt.eq(base_val), id_col].dropna().astype(str).str.strip())
+    end_ids = set(data.loc[rt.eq(end_val), id_col].dropna().astype(str).str.strip())
+    paired = base_ids & end_ids
+    return len(base_ids), len(end_ids), len(paired)
+
+
+def get_id_set(df: pd.DataFrame, id_col: str) -> set:
+    if not id_col or id_col not in df.columns:
+        return set()
+    return set(df[id_col].dropna().astype(str).str.strip().replace('', pd.NA).dropna())
+
+
+def show_analysis_count_summary(total_children: int, counted_children: int, reasons: Dict[str, int], details: Dict[str, list] = None):
+    not_counted = max(total_children - counted_children, 0)
+    st.info(f"Out of **{total_children}** child(ren), **{counted_children}** will be counted in this analysis and **{not_counted}** will not be counted.")
+    if reasons:
+        reason_df = pd.DataFrame([{"Reason": k, "Children": v} for k, v in reasons.items() if v > 0])
+        if not reason_df.empty:
+            st.dataframe(reason_df, hide_index=True, use_container_width=True)
+    if details:
+        with st.expander("Show not-counted child IDs"):
+            for reason, ids in details.items():
+                if ids:
+                    st.write(f"**{reason}** ({len(ids)})")
+                    st.dataframe(pd.DataFrame({"caseid": ids}), hide_index=True, use_container_width=True)
+
+
+def show_same_row_count_summary(raw_df: pd.DataFrame, id_col: str):
+    if not id_col or id_col not in raw_df.columns:
+        return
+    total_rows = len(raw_df)
+    valid_id_rows = int(raw_df[id_col].notna().sum())
+    missing_id_rows = total_rows - valid_id_rows
+    total_children = raw_df[id_col].dropna().astype(str).str.strip().nunique()
+    reasons = {}
+    if missing_id_rows > 0:
+        reasons["rows with missing child ID"] = missing_id_rows
+    show_analysis_count_summary(total_children=total_children, counted_children=total_children, reasons=reasons)
+
+
+def show_two_file_count_summary(base_df: pd.DataFrame, end_df: pd.DataFrame, base_id_col: str, end_id_col: str):
+    if not base_id_col or not end_id_col or base_id_col not in base_df.columns or end_id_col not in end_df.columns:
+        return
+    base_ids = get_id_set(base_df, base_id_col)
+    end_ids = get_id_set(end_df, end_id_col)
+    paired = base_ids & end_ids
+    only_base = sorted(base_ids - end_ids)
+    only_end = sorted(end_ids - base_ids)
+    total_children = len(base_ids | end_ids)
+    reasons = {
+        "only baseline with no endline": len(only_base),
+        "only endline with no baseline": len(only_end),
+    }
+    details = {
+        "only baseline with no endline": only_base,
+        "only endline with no baseline": only_end,
+    }
+    show_analysis_count_summary(total_children, len(paired), reasons, details)
+
+
+def show_duplicated_rows_count_summary(raw_df: pd.DataFrame, id_col: str, round_col: str, baseline_value, endline_value):
+    if not id_col or not round_col or not baseline_value or not endline_value:
+        return
+    if id_col not in raw_df.columns or round_col not in raw_df.columns:
+        return
+    data = raw_df.copy()
+    rt = data[round_col].astype('string').str.strip().str.lower()
+    base_val = str(baseline_value).strip().lower()
+    end_val = str(endline_value).strip().lower()
+    base_ids = set(data.loc[rt.eq(base_val), id_col].dropna().astype(str).str.strip())
+    end_ids = set(data.loc[rt.eq(end_val), id_col].dropna().astype(str).str.strip())
+    paired = base_ids & end_ids
+    only_base = sorted(base_ids - end_ids)
+    only_end = sorted(end_ids - base_ids)
+    all_known_round_ids = base_ids | end_ids
+    all_ids = get_id_set(raw_df, id_col)
+    other_round_ids = sorted(all_ids - all_known_round_ids)
+    total_children = len(all_ids)
+    reasons = {
+        "only baseline with no endline": len(only_base),
+        "only endline with no baseline": len(only_end),
+        "not baseline/endline round value": len(other_round_ids),
+    }
+    details = {
+        "only baseline with no endline": only_base,
+        "only endline with no baseline": only_end,
+        "not baseline/endline round value": other_round_ids,
+    }
+    show_analysis_count_summary(total_children, len(paired), reasons, details)
 
 def build_same_row_df(raw_df: pd.DataFrame, mapping: Dict[str, str]) -> pd.DataFrame:
     # Rename mapped uploaded columns into the standard format, then discard all other columns.
@@ -862,6 +984,10 @@ elif st.session_state.step == 2:
         with tab_preview:
             st.dataframe(raw_df.head(20), use_container_width=True)
 
+        if mapping.get("caseid"):
+            st.markdown("#### Analysis count summary")
+            show_same_row_count_summary(raw_df, mapping.get("caseid"))
+
         required_keys = META_COLUMNS + BASELINE_QUESTION_COLS + ENDLINE_QUESTION_COLS
 
         if st.button("Next: Score text values", type="primary"):
@@ -900,6 +1026,10 @@ elif st.session_state.step == 2:
             for base_col in BASELINE_QUESTION_COLS:
                 selectbox_mapping(question_mapping_label(f"{base_col}_post"), base_col, end_cols, f"end_{base_col}", mapping, endline_hint=True)
 
+        if mapping.get("base_id") and mapping.get("end_id"):
+            st.markdown("#### Analysis count summary")
+            show_two_file_count_summary(base_df, end_df, mapping.get("base_id"), mapping.get("end_id"))
+
         required_keys = ["base_id", "end_id", "base_IDELA_date"] + [f"base_{c}" for c in META_COLUMNS if c not in ["caseid", "IDELA_date"]] + [f"base_{c}" for c in BASELINE_QUESTION_COLS] + [f"end_{c}" for c in BASELINE_QUESTION_COLS]
         if st.button("Next: Score text values", type="primary"):
             missing = [k for k in required_keys if not mapping.get(k)]
@@ -912,10 +1042,17 @@ elif st.session_state.step == 2:
             elif base_dups or end_dups:
                 st.error("Duplicate mappings found. Baseline: " + ", ".join(base_dups) + " Endline: " + ", ".join(end_dups))
             else:
-                st.session_state.column_mapping = mapping
-                st.session_state.mapped_df = build_two_file_df(base_df, end_df, mapping)
-                st.session_state.selected_delete_indices = set()
-                go_next()
+                mapped = build_two_file_df(base_df, end_df, mapping)
+                expected_min = max(10, int(min(base_df[mapping["base_id"]].nunique(), end_df[mapping["end_id"]].nunique()) * 0.50))
+                ok, msg = validate_paired_rows(mapped, expected_min_rows=expected_min)
+                if not ok:
+                    st.error(msg)
+                    st.info("Check that both files use the same child/beneficiary ID column.")
+                else:
+                    st.session_state.column_mapping = mapping
+                    st.session_state.mapped_df = mapped
+                    st.session_state.selected_delete_indices = set()
+                    go_next()
 
     else:
         raw_df = st.session_state.raw_df
@@ -944,6 +1081,10 @@ elif st.session_state.step == 2:
         with tab_preview:
             st.dataframe(raw_df.head(20), use_container_width=True)
 
+        if mapping.get("dup_id") and mapping.get("round_col") and baseline_value and endline_value:
+            st.markdown("#### Analysis count summary")
+            show_duplicated_rows_count_summary(raw_df, mapping.get("dup_id"), mapping.get("round_col"), baseline_value, endline_value)
+
         required_keys = ["dup_id", "round_col", "meta_IDELA_date"] + [f"meta_{c}" for c in META_COLUMNS if c not in ["caseid", "IDELA_date"]] + [f"q_{c}" for c in BASELINE_QUESTION_COLS]
         if st.button("Next: Score text values", type="primary"):
             missing = [k for k in required_keys if not mapping.get(k)]
@@ -956,10 +1097,19 @@ elif st.session_state.step == 2:
             elif duplicates:
                 st.error("Some uploaded columns are mapped more than once: " + ", ".join(duplicates))
             else:
-                st.session_state.column_mapping = mapping
-                st.session_state.mapped_df = build_duplicated_rows_df(raw_df, mapping, baseline_value, endline_value)
-                st.session_state.selected_delete_indices = set()
-                go_next()
+                base_n, end_n, paired_n = duplicated_pairing_summary(raw_df, mapping["dup_id"], mapping["round_col"], baseline_value, endline_value)
+                expected_min = max(10, int(min(base_n, end_n) * 0.50))
+                mapped = build_duplicated_rows_df(raw_df, mapping, baseline_value, endline_value)
+                ok, msg = validate_paired_rows(mapped, expected_min_rows=expected_min)
+                if not ok:
+                    st.error(msg)
+                    st.info(f"Baseline IDs: {base_n} | Endline IDs: {end_n} | Paired IDs: {paired_n}. Recommended ID column for your file: form.case.@case_id")
+                else:
+                    st.success(f"Paired baseline/endline rows created: {len(mapped)}")
+                    st.session_state.column_mapping = mapping
+                    st.session_state.mapped_df = mapped
+                    st.session_state.selected_delete_indices = set()
+                    go_next()
 
     st.session_state.column_mapping = mapping
     if st.button("Back"):
