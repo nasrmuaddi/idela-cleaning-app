@@ -341,37 +341,56 @@ def read_excel_file(uploaded_file, sheet_name):
     return pd.read_excel(uploaded_file, sheet_name=sheet_name)
 
 
+BLANK_VALUE_LABEL = "[blank / empty cell]"
+
+
 def is_missing_question_value(series: pd.Series) -> pd.Series:
-    as_text = series.astype("string").str.strip()
+    as_text = series.astype("string").str.strip().str.lower()
     numeric = pd.to_numeric(series, errors="coerce")
-    return series.isna() | as_text.isin(["---", "", "999"]) | numeric.eq(999)
+    return (
+        series.isna()
+        | as_text.isin(["---", "", "999", "nan", "none", "null"])
+        | numeric.eq(999)
+    )
 
 
 def normalize_score_values(df: pd.DataFrame, question_cols: List[str]) -> pd.DataFrame:
     out = df.copy()
     for col in question_cols:
         if col in out.columns:
-            out[col] = out[col].replace({"---": 999, "": pd.NA})
+            out[col] = out[col].replace({"---": 999, "": pd.NA, " ": pd.NA})
             out[col] = pd.to_numeric(out[col], errors="coerce")
     return out
 
 
 def detect_unscored_values(df: pd.DataFrame, question_cols: List[str]) -> pd.DataFrame:
-    """Find text values in question columns that cannot be converted to numbers."""
+    """Find values in question columns that need a user score, including blank cells."""
     rows = []
     for col in question_cols:
         if col not in df.columns:
             continue
         s = df[col]
         as_text = s.astype("string").str.strip()
+        as_text_lower = as_text.str.lower()
         numeric = pd.to_numeric(s, errors="coerce")
-        mask = (
-            s.notna()
-            & ~as_text.isin(["", "---", "999"])
+
+        # Ask the user how blank/null cells should be scored.
+        blank_mask = s.isna() | as_text_lower.isin(["", "nan", "none", "null"])
+        if blank_mask.any():
+            rows.append({
+                "Column": col,
+                "Uploaded value": BLANK_VALUE_LABEL,
+                "Rows": int(blank_mask.sum()),
+            })
+
+        # Ask the user about non-numeric text values, including --- and typo variants.
+        text_mask = (
+            ~blank_mask
             & ~numeric.notna()
+            & ~as_text_lower.isin(["999"])
         )
-        if mask.any():
-            for value, count in as_text[mask].value_counts(dropna=True).items():
+        if text_mask.any():
+            for value, count in as_text[text_mask].value_counts(dropna=True).items():
                 rows.append({
                     "Column": col,
                     "Uploaded value": str(value),
@@ -382,22 +401,31 @@ def detect_unscored_values(df: pd.DataFrame, question_cols: List[str]) -> pd.Dat
 
 def default_score_suggestion(value: str):
     v = str(value).strip().lower()
-    positive = {"correct", "yes", "true", "y", "صحيح", "نعم"}
-    negative = {"incorrect", "wrong", "no", "false", "n", "خطأ", "غير صحيح", "لا"}
-    missing = {"no response", "no_response", "noresponse", "missing", "na", "n/a", "null", "blank", "لا استجابة", "بدون استجابة"}
-    if v in positive:
-        return 1
-    if v in negative:
-        return 0
-    if v in missing:
+    v_norm = v.replace("-", "_").replace(" ", "_")
+    positive = {"correct", "yes", "true", "y", "appropriate_response", "صحيح", "نعم"}
+    negative = {"incorrect", "not_correct", "wrong", "no", "false", "not_true", "n", "خطأ", "غير صحيح", "لا"}
+    if v == BLANK_VALUE_LABEL.lower():
         return 999
-    return None
+    if v_norm in positive:
+        return 1
+    if v_norm in negative:
+        return 0
+    # Any no-response typo/variant should default to missing.
+    if "response" in v_norm or "resonse" in v_norm or "rsponse" in v_norm or v_norm in {"---", "missing", "na", "n/a", "null", "blank", "none", "nan"}:
+        return 999
+    return 999
 
 
 def apply_value_recode(df: pd.DataFrame, question_cols: List[str], recode_mapping: Dict[str, object]) -> pd.DataFrame:
-    """Replace non-numeric text answers in question fields with user-selected scores."""
+    """Replace text answers and blank cells in question fields with user-selected scores."""
     out = df.copy()
     clean_mapping = {}
+    blank_score = recode_mapping.get(BLANK_VALUE_LABEL, None)
+    try:
+        blank_score = float(blank_score) if blank_score is not None else None
+    except Exception:
+        blank_score = None
+
     for value, score in recode_mapping.items():
         try:
             clean_mapping[str(value).strip().lower()] = float(score)
@@ -407,11 +435,13 @@ def apply_value_recode(df: pd.DataFrame, question_cols: List[str], recode_mappin
     for col in question_cols:
         if col not in out.columns:
             continue
+
         def recode_cell(x):
-            if pd.isna(x):
-                return x
+            if pd.isna(x) or str(x).strip().lower() in ["", "nan", "none", "null"]:
+                return blank_score if blank_score is not None else x
             key = str(x).strip().lower()
             return clean_mapping.get(key, x)
+
         out[col] = out[col].map(recode_cell)
     return out
 
@@ -1078,8 +1108,8 @@ elif st.session_state.step == 5:
             "Endline ID": post_col,
             "Arabic": arabic_name,
             "English": english_name,
-            "% Missing Baseline": base_missing,
-            "% Missing Endline": end_missing,
+            "% Missing Baseline": base_missing * 100,
+            "% Missing Endline": end_missing * 100,
             "High Missing": "YES" if (base_missing >= 0.30 or end_missing >= 0.30) else "",
             "Action": st.session_state.actions.get(base_col, default_action),
         })
@@ -1124,8 +1154,8 @@ elif st.session_state.step == 5:
             "Endline ID": st.column_config.TextColumn("Endline ID", disabled=True),
             "Arabic": st.column_config.TextColumn("Arabic", disabled=True),
             "English": st.column_config.TextColumn("English", disabled=True),
-            "% Missing Baseline": st.column_config.ProgressColumn("% Missing Baseline", format="%.1f%%", min_value=0, max_value=1),
-            "% Missing Endline": st.column_config.ProgressColumn("% Missing Endline", format="%.1f%%", min_value=0, max_value=1),
+            "% Missing Baseline": st.column_config.ProgressColumn("% Missing Baseline", format="%.1f%%", min_value=0, max_value=100),
+            "% Missing Endline": st.column_config.ProgressColumn("% Missing Endline", format="%.1f%%", min_value=0, max_value=100),
             "High Missing": st.column_config.TextColumn("High Missing", disabled=True),
             "Action": st.column_config.SelectboxColumn("Action", options=action_options, required=True),
         },
