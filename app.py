@@ -848,11 +848,11 @@ def write_visual_dashboard(writer, workbook, sheet_name: str, source_df: pd.Data
     dec_name = f"{safe_prefix}_DEC"
 
     # Count only non-empty category labels. Formulas returning "" are ignored.
-    height_formula = f'COUNTIF('{chart_sheet}'!$X$2:$X${max_chart_rows+1},"?*")'
-    workbook.define_name(cat_name, f'=OFFSET('{chart_sheet}'!$X$2,0,0,{height_formula},1)')
-    workbook.define_name(imp_name, f'=OFFSET('{chart_sheet}'!$Y$2,0,0,{height_formula},1)')
-    workbook.define_name(same_name, f'=OFFSET('{chart_sheet}'!$Z$2,0,0,{height_formula},1)')
-    workbook.define_name(dec_name, f'=OFFSET('{chart_sheet}'!$AA$2,0,0,{height_formula},1)')
+    height_formula = f"COUNTIF('{chart_sheet}'!$X$2:$X${max_chart_rows+1},\"?*\")"
+    workbook.define_name(cat_name, f"=OFFSET('{chart_sheet}'!$X$2,0,0,{height_formula},1)")
+    workbook.define_name(imp_name, f"=OFFSET('{chart_sheet}'!$Y$2,0,0,{height_formula},1)")
+    workbook.define_name(same_name, f"=OFFSET('{chart_sheet}'!$Z$2,0,0,{height_formula},1)")
+    workbook.define_name(dec_name, f"=OFFSET('{chart_sheet}'!$AA$2,0,0,{height_formula},1)")
 
     chart = workbook.add_chart({"type": "column"})
     chart.add_series({
