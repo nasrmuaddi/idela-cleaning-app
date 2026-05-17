@@ -820,43 +820,58 @@ def write_visual_dashboard(writer, workbook, sheet_name: str, source_df: pd.Data
     dash_ws.write_formula("G9", f'=IFERROR(SUMIFS(\'{source_name}\'!$J$2:$J${max_source_row},\'{source_name}\'!$B$2:$B${max_source_row},$B$3,\'{source_name}\'!$D$2:$D${max_source_row},$B$4)/$A$9,0)', pct_fmt)
 
     # Hidden chart source table in X:AA.
-    # It intentionally returns NA() for unused rows to stop Excel from drawing many zero bars.
+    # The chart uses dynamic named ranges so it only plots visible categories
+    # after the user changes the dropdowns. This prevents the many 0%/#N/A bars.
     headers = ["Category", "Improved", "No change", "Decreased"]
     for idx, h in enumerate(headers, start=23):
         dash_ws.write(0, idx, h, hidden_header_fmt)
 
     max_chart_rows = 40
+    filter_condition = f"(\'{source_name}\'!$B$2:$B${max_source_row}=$B$3)*(\'{source_name}\'!$D$2:$D${max_source_row}=$B$4)"
+
     for row in range(2, max_chart_rows + 2):
         excel_row = row
         idx_formula = f"ROW(A{row-1})"
-        filter_condition = f"(\'{source_name}\'!$B$2:$B${max_source_row}=$B$3)*(\'{source_name}\'!$D$2:$D${max_source_row}=$B$4)"
         cat_formula = f'=IFERROR(INDEX(FILTER(\'{source_name}\'!$C$2:$C${max_source_row},{filter_condition}),{idx_formula}),"")'
         dash_ws.write_formula(excel_row - 1, 23, cat_formula)
+
         # Use percentages directly from the source table: G, I, K.
         for col_idx, source_col in zip([24, 25, 26], ["G", "I", "K"]):
             value_formula = f'=IF($X{excel_row}="",NA(),IFERROR(INDEX(FILTER(\'{source_name}\'!${source_col}$2:${source_col}${max_source_row},{filter_condition}),{idx_formula}),NA()))'
             dash_ws.write_formula(excel_row - 1, col_idx, value_formula, pct_fmt)
 
-    chart = workbook.add_chart({"type": "column"})
     chart_sheet = sheet_name[:31]
-    last_chart_row = max_chart_rows + 1
+    safe_prefix = sheet_name.replace(" ", "_").replace("-", "_")[:20]
+    cat_name = f"{safe_prefix}_CATS"
+    imp_name = f"{safe_prefix}_IMP"
+    same_name = f"{safe_prefix}_SAME"
+    dec_name = f"{safe_prefix}_DEC"
+
+    # Count only non-empty category labels. Formulas returning "" are ignored.
+    height_formula = f'COUNTIF('{chart_sheet}'!$X$2:$X${max_chart_rows+1},"?*")'
+    workbook.define_name(cat_name, f'=OFFSET('{chart_sheet}'!$X$2,0,0,{height_formula},1)')
+    workbook.define_name(imp_name, f'=OFFSET('{chart_sheet}'!$Y$2,0,0,{height_formula},1)')
+    workbook.define_name(same_name, f'=OFFSET('{chart_sheet}'!$Z$2,0,0,{height_formula},1)')
+    workbook.define_name(dec_name, f'=OFFSET('{chart_sheet}'!$AA$2,0,0,{height_formula},1)')
+
+    chart = workbook.add_chart({"type": "column"})
     chart.add_series({
         "name": f"='{chart_sheet}'!$Y$1",
-        "categories": f"='{chart_sheet}'!$X$2:$X${last_chart_row}",
-        "values": f"='{chart_sheet}'!$Y$2:$Y${last_chart_row}",
+        "categories": f"={cat_name}",
+        "values": f"={imp_name}",
         "data_labels": {"value": True, "num_format": "0%"},
         "gap": 80,
     })
     chart.add_series({
         "name": f"='{chart_sheet}'!$Z$1",
-        "categories": f"='{chart_sheet}'!$X$2:$X${last_chart_row}",
-        "values": f"='{chart_sheet}'!$Z$2:$Z${last_chart_row}",
+        "categories": f"={cat_name}",
+        "values": f"={same_name}",
         "data_labels": {"value": True, "num_format": "0%"},
     })
     chart.add_series({
         "name": f"='{chart_sheet}'!$AA$1",
-        "categories": f"='{chart_sheet}'!$X$2:$X${last_chart_row}",
-        "values": f"='{chart_sheet}'!$AA$2:$AA${last_chart_row}",
+        "categories": f"={cat_name}",
+        "values": f"={dec_name}",
         "data_labels": {"value": True, "num_format": "0%"},
     })
     chart.set_title({"name": "Comparison status by selected category"})
@@ -876,6 +891,7 @@ def to_excel_bytes(sheets: Dict[str, pd.DataFrame]) -> bytes:
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
         workbook = writer.book
+        workbook.set_calc_mode("auto")
         dashboard_sources = {}
         for sheet_name, data in sheets.items():
             if sheet_name in ["QUESTION DASHBOARD", "ITEM DASHBOARD", "DOMAIN DASHBOARD", "IDELA DASHBOARD"]:
