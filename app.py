@@ -344,12 +344,28 @@ def read_excel_file(uploaded_file, sheet_name):
 BLANK_VALUE_LABEL = "[blank / empty cell]"
 
 
+def clean_cell_text(series: pd.Series) -> pd.Series:
+    """Normalize cell text so real blanks, Excel blanks, spaces, NBSP, and null-like text are detected consistently."""
+    return (
+        series.astype("string")
+        .str.replace("\u00a0", " ", regex=False)
+        .str.replace("\u200b", "", regex=False)
+        .str.strip()
+        .str.lower()
+    )
+
+
+def is_blank_like(series: pd.Series) -> pd.Series:
+    txt = clean_cell_text(series)
+    return series.isna() | txt.isin(["", "nan", "none", "null", "<na>"])
+
+
 def is_missing_question_value(series: pd.Series) -> pd.Series:
-    as_text = series.astype("string").str.strip().str.lower()
+    as_text = clean_cell_text(series)
     numeric = pd.to_numeric(series, errors="coerce")
     return (
-        series.isna()
-        | as_text.isin(["---", "", "999", "nan", "none", "null"])
+        is_blank_like(series)
+        | as_text.isin(["---", "999", "999.0"])
         | numeric.eq(999)
     )
 
@@ -386,12 +402,17 @@ def detect_unscored_values(df: pd.DataFrame, question_cols: List[str]) -> pd.Dat
             continue
 
         s = df[col]
-        as_text = s.astype("string").str.strip()
-        as_text_lower = as_text.str.lower()
+        as_text = (
+            s.astype("string")
+            .str.replace("\u00a0", " ", regex=False)
+            .str.replace("\u200b", "", regex=False)
+            .str.strip()
+        )
+        as_text_lower = clean_cell_text(s)
         numeric = pd.to_numeric(s, errors="coerce")
 
         # 1) Always ask about blank/null cells if they exist.
-        blank_mask = s.isna() | as_text_lower.isin(["", "nan", "none", "null", "<na>"])
+        blank_mask = is_blank_like(s)
         if blank_mask.any():
             rows.append({
                 "Column": col,
@@ -953,6 +974,27 @@ elif st.session_state.step == 3:
     mapped_df = st.session_state.mapped_df.copy()
     all_question_cols = [c for c in BASELINE_QUESTION_COLS + ENDLINE_QUESTION_COLS if c in mapped_df.columns]
     unscored_df = detect_unscored_values(mapped_df, all_question_cols)
+
+    # Safety check: some Excel blank cells can arrive as special empty strings.
+    # If any question column still contains a blank-like value, force the blank scoring row to appear.
+    blank_total = 0
+    blank_example_cols = []
+    for _col in all_question_cols:
+        if _col in mapped_df.columns:
+            _cnt = int(is_blank_like(mapped_df[_col]).sum())
+            if _cnt > 0:
+                blank_total += _cnt
+                if len(blank_example_cols) < 5:
+                    blank_example_cols.append(_col)
+    if blank_total > 0 and (unscored_df.empty or BLANK_VALUE_LABEL not in unscored_df["Uploaded value"].astype(str).tolist()):
+        unscored_df = pd.concat([
+            pd.DataFrame([{
+                "Column": ", ".join(blank_example_cols),
+                "Uploaded value": BLANK_VALUE_LABEL,
+                "Rows": blank_total,
+            }]),
+            unscored_df,
+        ], ignore_index=True)
 
     if unscored_df.empty:
         st.success("All question fields are already numeric, or contain only recognized missing values.")
