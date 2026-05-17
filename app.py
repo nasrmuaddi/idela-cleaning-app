@@ -101,6 +101,7 @@ ITEM_MAPPING = {
     "i1a_name_mark": "ITEM_1",
     "i1a_age_mark": "ITEM_1",
     "i1a_sex_mark": "ITEM_1",
+    "i1a_caregiver_mark": "ITEM_1",
     "i1a_neighborhood_mark": "ITEM_1",
     "i1a_state_mark": "ITEM_1",
     "i1a_country_mark": "ITEM_1",
@@ -214,6 +215,18 @@ def question_mapping_label(question_col: str) -> str:
         return f"{question_col} — {english.strip()} | {arabic.strip()}"
     return f"{question_col} — {label}"
 
+
+def question_excel_name(base_col: str, language: str = "both") -> str:
+    """Return readable question names for Excel sheets instead of question IDs."""
+    label = QUESTION_LABELS.get(base_col.replace("_post", ""), base_col)
+    if " | " not in label:
+        return label
+    arabic, english = [x.strip() for x in label.split(" | ", 1)]
+    if language == "english":
+        return english
+    if language == "arabic":
+        return arabic
+    return f"{english} | {arabic}"
 
 
 def init_state():
@@ -442,6 +455,7 @@ def apply_actions(df: pd.DataFrame, actions: Dict[str, str]) -> pd.DataFrame:
 
 
 def create_by_question(clean_df: pd.DataFrame, baseline_cols: List[str]) -> pd.DataFrame:
+    """Create question-level sheet using question names instead of IDs."""
     out = clean_df[[c for c in META_COLUMNS if c in clean_df.columns]].copy()
     used_baseline_score_cols = []
     used_endline_score_cols = []
@@ -450,14 +464,15 @@ def create_by_question(clean_df: pd.DataFrame, baseline_cols: List[str]) -> pd.D
         post_col = f"{base_col}_post"
         if base_col not in clean_df.columns or post_col not in clean_df.columns:
             continue
+
+        question_name = question_excel_name(base_col, language="both")
         base_numeric = pd.to_numeric(clean_df[base_col], errors="coerce")
         post_numeric = pd.to_numeric(clean_df[post_col], errors="coerce")
-        out[base_col] = base_numeric
-        out[post_col] = post_numeric
-        comp_col = base_col.replace("_mark", "_mark_comparison")
-        if comp_col == base_col:
-            comp_col = f"{base_col}_comparison"
-        out[comp_col] = post_numeric - base_numeric
+
+        out[f"{question_name} - baseline"] = base_numeric
+        out[f"{question_name} - endline"] = post_numeric
+        out[f"{question_name} - comparison"] = post_numeric - base_numeric
+
         used_baseline_score_cols.append(base_col)
         used_endline_score_cols.append(post_col)
 
