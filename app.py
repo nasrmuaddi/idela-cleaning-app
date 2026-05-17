@@ -818,49 +818,67 @@ def write_visual_dashboard(writer, workbook, sheet_name: str, source_df: pd.Data
     dash_ws.write_formula("E9", f'=IFERROR(SUMIFS(\'{source_name}\'!$H$2:$H${max_source_row},\'{source_name}\'!$B$2:$B${max_source_row},$B$3,\'{source_name}\'!$D$2:$D${max_source_row},$B$4)/$A$9,0)', pct_fmt)
     dash_ws.write_formula("G9", f'=IFERROR(SUMIFS(\'{source_name}\'!$J$2:$J${max_source_row},\'{source_name}\'!$B$2:$B${max_source_row},$B$3,\'{source_name}\'!$D$2:$D${max_source_row},$B$4)/$A$9,0)', pct_fmt)
 
-    # Small visible chart source table. It uses FILTER spill formulas.
-    # This is the key fix: no fixed 40-row range, no #N/A rows, no 0% fake categories.
+    # Small visible chart source table.
+    # IMPORTANT: Excel charts do not reliably refresh from dynamic spill references like X2#.
+    # So we write a fixed helper range with formulas that update when dropdowns change.
+    # Empty extra rows return blank / #N/A and are ignored by the chart.
     headers = ["Category", "Improved", "No change", "Decreased"]
     for idx, h in enumerate(headers, start=23):
         dash_ws.write(0, idx, h, hidden_header_fmt)
 
     condition = f"(\'{source_name}\'!$B$2:$B${max_source_row}=$B$3)*(\'{source_name}\'!$D$2:$D${max_source_row}=$B$4)"
-    dash_ws.write_formula("X2", f'=FILTER(\'{source_name}\'!$C$2:$C${max_source_row},{condition},"")')
-    dash_ws.write_formula("Y2", f'=FILTER(\'{source_name}\'!$G$2:$G${max_source_row},{condition},0)', pct_fmt)
-    dash_ws.write_formula("Z2", f'=FILTER(\'{source_name}\'!$I$2:$I${max_source_row},{condition},0)', pct_fmt)
-    dash_ws.write_formula("AA2", f'=FILTER(\'{source_name}\'!$K$2:$K${max_source_row},{condition},0)', pct_fmt)
+    max_chart_rows = 30
+
+    for r in range(2, max_chart_rows + 2):
+        k = r - 1
+        # Category
+        dash_ws.write_formula(
+            r - 1,
+            23,
+            f'=IFERROR(INDEX(FILTER(\'{source_name}\'!$C$2:$C${max_source_row},{condition}),{k}),"")'
+        )
+        # Improved %
+        dash_ws.write_formula(
+            r - 1,
+            24,
+            f'=IF($X{r}="",NA(),IFERROR(INDEX(FILTER(\'{source_name}\'!$G$2:$G${max_source_row},{condition}),{k}),NA()))',
+            pct_fmt
+        )
+        # No change %
+        dash_ws.write_formula(
+            r - 1,
+            25,
+            f'=IF($X{r}="",NA(),IFERROR(INDEX(FILTER(\'{source_name}\'!$I$2:$I${max_source_row},{condition}),{k}),NA()))',
+            pct_fmt
+        )
+        # Decreased %
+        dash_ws.write_formula(
+            r - 1,
+            26,
+            f'=IF($X{r}="",NA(),IFERROR(INDEX(FILTER(\'{source_name}\'!$K$2:$K${max_source_row},{condition}),{k}),NA()))',
+            pct_fmt
+        )
 
     chart_sheet = sheet_name[:31]
-    safe_prefix = sheet_name.replace(" ", "_").replace("-", "_")[:20]
-    cat_name = f"{safe_prefix}_CATS"
-    imp_name = f"{safe_prefix}_IMP"
-    same_name = f"{safe_prefix}_SAME"
-    dec_name = f"{safe_prefix}_DEC"
-
-    # Dynamic spilled ranges. Excel will recalculate these when dropdowns change.
-    workbook.define_name(cat_name, f"='{chart_sheet}'!$X$2#")
-    workbook.define_name(imp_name, f"='{chart_sheet}'!$Y$2#")
-    workbook.define_name(same_name, f"='{chart_sheet}'!$Z$2#")
-    workbook.define_name(dec_name, f"='{chart_sheet}'!$AA$2#")
 
     chart = workbook.add_chart({"type": "column"})
     chart.add_series({
         "name": f"='{chart_sheet}'!$Y$1",
-        "categories": f"={cat_name}",
-        "values": f"={imp_name}",
+        "categories": f"='{chart_sheet}'!$X$2:$X$31",
+        "values": f"='{chart_sheet}'!$Y$2:$Y$31",
         "data_labels": {"value": True, "num_format": "0%"},
         "gap": 80,
     })
     chart.add_series({
         "name": f"='{chart_sheet}'!$Z$1",
-        "categories": f"={cat_name}",
-        "values": f"={same_name}",
+        "categories": f"='{chart_sheet}'!$X$2:$X$31",
+        "values": f"='{chart_sheet}'!$Z$2:$Z$31",
         "data_labels": {"value": True, "num_format": "0%"},
     })
     chart.add_series({
         "name": f"='{chart_sheet}'!$AA$1",
-        "categories": f"={cat_name}",
-        "values": f"={dec_name}",
+        "categories": f"='{chart_sheet}'!$X$2:$X$31",
+        "values": f"='{chart_sheet}'!$AA$2:$AA$31",
         "data_labels": {"value": True, "num_format": "0%"},
     })
     chart.set_title({"name": "Comparison status by selected category"})
