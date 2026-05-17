@@ -389,21 +389,15 @@ def replace_question_nulls_with_dash(df: pd.DataFrame, question_cols: List[str])
 
 def detect_unscored_values(df: pd.DataFrame, question_cols: List[str]) -> pd.DataFrame:
     """
-    Find values in question columns that need a user score.
-    This intentionally includes missing-style values too, because users may want to score
-    blank/999/--- as 0, 1, or keep them as 999 for the Question Actions step.
+    Find uploaded TEXT values in question columns that still need scoring.
+
+    Important behavior:
+    - Real blanks/nulls are shown as blank / empty cell.
+    - --- is shown so the user can score missing values.
+    - Numeric values such as 0, 1, 2, and 999 are NOT shown again.
+      This prevents 999 from reappearing after the user already scored --- or no_response as 999.
     """
     rows = []
-    missing_labels = {
-        "": BLANK_VALUE_LABEL,
-        "nan": BLANK_VALUE_LABEL,
-        "none": BLANK_VALUE_LABEL,
-        "null": BLANK_VALUE_LABEL,
-        "<na>": BLANK_VALUE_LABEL,
-        "---": "---",
-        "999": "999",
-        "999.0": "999",
-    }
 
     for col in question_cols:
         if col not in df.columns:
@@ -412,9 +406,10 @@ def detect_unscored_values(df: pd.DataFrame, question_cols: List[str]) -> pd.Dat
         s = df[col]
         as_text = s.astype("string").str.strip()
         as_text_lower = as_text.str.lower()
-        numeric = pd.to_numeric(s, errors="coerce")
+        numeric = pd.to_numeric(as_text, errors="coerce")
 
-        # 1) Always ask about blank/null cells if they exist.
+        # 1) Ask about real blank/null cells. In normal flow these are converted to --- before Step 3,
+        # but this stays here as a safety net.
         blank_mask = s.isna() | as_text_lower.isin(["", "nan", "none", "null", "<na>"])
         if blank_mask.any():
             rows.append({
@@ -423,21 +418,20 @@ def detect_unscored_values(df: pd.DataFrame, question_cols: List[str]) -> pd.Dat
                 "Rows": int(blank_mask.sum()),
             })
 
-        # 2) Ask about explicit missing codes such as 999 and ---.
-        for raw_missing, label in [("999", "999"), ("999.0", "999"), ("---", "---")]:
-            mask = ~blank_mask & as_text_lower.eq(raw_missing)
-            if mask.any():
-                rows.append({
-                    "Column": col,
-                    "Uploaded value": label,
-                    "Rows": int(mask.sum()),
-                })
+        # 2) Ask about --- only. Do NOT ask about 999 because 999 is a valid numeric missing score.
+        dash_mask = ~blank_mask & as_text_lower.eq("---")
+        if dash_mask.any():
+            rows.append({
+                "Column": col,
+                "Uploaded value": "---",
+                "Rows": int(dash_mask.sum()),
+            })
 
-        # 3) Ask about any non-numeric text values.
+        # 3) Ask about non-numeric text values only. Numeric values, including 999, are skipped.
         text_mask = (
             ~blank_mask
+            & ~dash_mask
             & ~numeric.notna()
-            & ~as_text_lower.isin(["999", "999.0", "---"])
         )
         if text_mask.any():
             for value, count in as_text[text_mask].value_counts(dropna=True).items():
