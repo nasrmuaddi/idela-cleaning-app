@@ -364,18 +364,34 @@ def normalize_score_values(df: pd.DataFrame, question_cols: List[str]) -> pd.Dat
 
 
 def detect_unscored_values(df: pd.DataFrame, question_cols: List[str]) -> pd.DataFrame:
-    """Find values in question columns that need a user score, including blank cells."""
+    """
+    Find values in question columns that need a user score.
+    This intentionally includes missing-style values too, because users may want to score
+    blank/999/--- as 0, 1, or keep them as 999 for the Question Actions step.
+    """
     rows = []
+    missing_labels = {
+        "": BLANK_VALUE_LABEL,
+        "nan": BLANK_VALUE_LABEL,
+        "none": BLANK_VALUE_LABEL,
+        "null": BLANK_VALUE_LABEL,
+        "<na>": BLANK_VALUE_LABEL,
+        "---": "---",
+        "999": "999",
+        "999.0": "999",
+    }
+
     for col in question_cols:
         if col not in df.columns:
             continue
+
         s = df[col]
         as_text = s.astype("string").str.strip()
         as_text_lower = as_text.str.lower()
         numeric = pd.to_numeric(s, errors="coerce")
 
-        # Ask the user how blank/null cells should be scored.
-        blank_mask = s.isna() | as_text_lower.isin(["", "nan", "none", "null"])
+        # 1) Always ask about blank/null cells if they exist.
+        blank_mask = s.isna() | as_text_lower.isin(["", "nan", "none", "null", "<na>"])
         if blank_mask.any():
             rows.append({
                 "Column": col,
@@ -383,11 +399,21 @@ def detect_unscored_values(df: pd.DataFrame, question_cols: List[str]) -> pd.Dat
                 "Rows": int(blank_mask.sum()),
             })
 
-        # Ask the user about non-numeric text values, including --- and typo variants.
+        # 2) Ask about explicit missing codes such as 999 and ---.
+        for raw_missing, label in [("999", "999"), ("999.0", "999"), ("---", "---")]:
+            mask = ~blank_mask & as_text_lower.eq(raw_missing)
+            if mask.any():
+                rows.append({
+                    "Column": col,
+                    "Uploaded value": label,
+                    "Rows": int(mask.sum()),
+                })
+
+        # 3) Ask about any non-numeric text values.
         text_mask = (
             ~blank_mask
             & ~numeric.notna()
-            & ~as_text_lower.isin(["999"])
+            & ~as_text_lower.isin(["999", "999.0", "---"])
         )
         if text_mask.any():
             for value, count in as_text[text_mask].value_counts(dropna=True).items():
@@ -396,6 +422,7 @@ def detect_unscored_values(df: pd.DataFrame, question_cols: List[str]) -> pd.Dat
                     "Uploaded value": str(value),
                     "Rows": int(count),
                 })
+
     return pd.DataFrame(rows)
 
 
@@ -410,14 +437,17 @@ def default_score_suggestion(value: str):
         return 1
     if v_norm in negative:
         return 0
+    # Missing-style values should default to 999, but user can change them.
+    if v_norm in {"999", "999.0", "---", "missing", "na", "n/a", "null", "blank", "none", "nan", "<na>"}:
+        return 999
     # Any no-response typo/variant should default to missing.
-    if "response" in v_norm or "resonse" in v_norm or "rsponse" in v_norm or v_norm in {"---", "missing", "na", "n/a", "null", "blank", "none", "nan"}:
+    if "response" in v_norm or "resonse" in v_norm or "rsponse" in v_norm:
         return 999
     return 999
 
 
 def apply_value_recode(df: pd.DataFrame, question_cols: List[str], recode_mapping: Dict[str, object]) -> pd.DataFrame:
-    """Replace text answers and blank cells in question fields with user-selected scores."""
+    """Replace text answers and blank/missing-code cells in question fields with user-selected scores."""
     out = df.copy()
     clean_mapping = {}
     blank_score = recode_mapping.get(BLANK_VALUE_LABEL, None)
@@ -437,10 +467,12 @@ def apply_value_recode(df: pd.DataFrame, question_cols: List[str], recode_mappin
             continue
 
         def recode_cell(x):
-            if pd.isna(x) or str(x).strip().lower() in ["", "nan", "none", "null"]:
+            raw = str(x).strip().lower()
+            if pd.isna(x) or raw in ["", "nan", "none", "null", "<na>"]:
                 return blank_score if blank_score is not None else x
-            key = str(x).strip().lower()
-            return clean_mapping.get(key, x)
+            if raw == "999.0" and "999" in clean_mapping:
+                return clean_mapping["999"]
+            return clean_mapping.get(raw, x)
 
         out[col] = out[col].map(recode_cell)
     return out
