@@ -97,6 +97,113 @@ QUESTION_LABELS = {
 BASELINE_QUESTION_COLS = list(QUESTION_LABELS.keys())
 ENDLINE_QUESTION_COLS = [f"{c}_post" for c in BASELINE_QUESTION_COLS]
 
+ITEM_MAPPING = {
+    "i1a_name_mark": "ITEM_1",
+    "i1a_age_mark": "ITEM_1",
+    "i1a_sex_mark": "ITEM_1",
+    "i1a_neighborhood_mark": "ITEM_1",
+    "i1a_state_mark": "ITEM_1",
+    "i1a_country_mark": "ITEM_1",
+    "country_from_mark": "ITEM_1",
+    "i2a_biggest_circle_mark": "ITEM_2",
+    "i2b_smallest_circle_mark": "ITEM_2",
+    "i2c_longest_stick_mark": "ITEM_2",
+    "i2d_shortest_stick_mark": "ITEM_2",
+    "i3_sort_criterion1_mark": "ITEM_3",
+    "i3_sort_criterion2_mark": "ITEM_3",
+    "i4_circle_mark": "ITEM_4",
+    "i4_rectangle_mark": "ITEM_4",
+    "i4_triangle_mark": "ITEM_4",
+    "i4_square_mark": "ITEM_4",
+    "i4_circle_env_mark": "ITEM_4",
+    "i5_row12_correct_count": "ITEM_5",
+    "i5_row34_correct_count": "ITEM_5",
+    "i6_give3_mark": "ITEM_6",
+    "i6_give5_mark": "ITEM_6",
+    "i6_give8_mark": "ITEM_6",
+    "i6_focus_mark": "ITEM_6",
+    "i6_eager_mark": "ITEM_6",
+    "i7_add3_2_mark": "ITEM_7",
+    "i7_add2_2_mark": "ITEM_7",
+    "i7_subtract1_from3_mark": "ITEM_7",
+    "i8_friends_count": "ITEM_8",
+    "i9_sad_trigger_mark": "ITEM_9",
+    "i9_regulate1_mark": "ITEM_9",
+    "i9_regulate2_mark": "ITEM_9",
+    "i9_happy_trigger_mark": "ITEM_9",
+    "i10_understands_feeling_mark": "ITEM_10",
+    "i10_help1_mark": "ITEM_10",
+    "i10_help2_mark": "ITEM_10",
+    "i11_conflict1_mark": "ITEM_11",
+    "i11_conflict2_mark": "ITEM_11",
+    "i12_seq1_mark": "ITEM_12",
+    "i12_seq2_mark": "ITEM_12",
+    "i12_seq3_mark": "ITEM_12",
+    "i12_seq4_mark": "ITEM_12",
+    "i13_market_items_count": "ITEM_13",
+    "i13_animals_count": "ITEM_13",
+    "i14_open_book_mark": "ITEM_14",
+    "i14_point_text_mark": "ITEM_14",
+    "i14_text_direction_mark": "ITEM_14",
+    "i15_row12_letters_count": "ITEM_15",
+    "i15_row34_letters_count": "ITEM_15",
+    "i16_s_pair_mark": "ITEM_16",
+    "i16_t_pair_mark": "ITEM_16",
+    "i16_c_pair_mark": "ITEM_16",
+    "i17_writing_level": "ITEM_17",
+    "i18_mouse_stole_hat_mark": "ITEM_18",
+    "i18_hat_color_mark": "ITEM_18",
+    "i18_why_chased_mark": "ITEM_18",
+    "i18_where_trapped_mark": "ITEM_18",
+    "i18_why_spared_mark": "ITEM_18",
+    "i18_focus_mark": "ITEM_18",
+    "i18_eager_mark": "ITEM_18",
+    "i19_closed_corners": "ITEM_19",
+    "i19_exited_mark": "ITEM_19",
+    "i20_head_mark": "ITEM_20",
+    "i20_torso_mark": "ITEM_20",
+    "i20_arms_mark": "ITEM_20",
+    "i20_legs_mark": "ITEM_20",
+    "i20_face1_mark": "ITEM_20",
+    "i20_face2_mark": "ITEM_20",
+    "i20_hands_mark": "ITEM_20",
+    "i20_feet_mark": "ITEM_20",
+    "i20_focus_mark": "ITEM_20",
+    "i20_eager_mark": "ITEM_20",
+    "i21_steps": "ITEM_21",
+}
+
+ITEM_NAMES = {
+    "ITEM_1": "Personal Awareness",
+    "ITEM_2": "Comparison by Size and Length",
+    "ITEM_3": "Sorting and Classification",
+    "ITEM_4": "Shape Identification",
+    "ITEM_5": "Number ID",
+    "ITEM_6": "Number Sense – One to one Correspondence",
+    "ITEM_7": "Addition and Subtraction",
+    "ITEM_8": "Friends",
+    "ITEM_9": "Emotional Awareness/Regulation",
+    "ITEM_10": "Empathy/Perspective Taking",
+    "ITEM_11": "Sharing/Solving Conflict",
+    "ITEM_12": "Short-Term Memory",
+    "ITEM_13": "Oral Vocabulary",
+    "ITEM_14": "Print Awareness",
+    "ITEM_15": "Letter Identification",
+    "ITEM_16": "First Letter Sounds",
+    "ITEM_17": "Emergent Writing",
+    "ITEM_18": "Oral Comprehension",
+    "ITEM_19": "Copying a Shape",
+    "ITEM_20": "Drawing a Person",
+    "ITEM_21": "Hopping",
+}
+
+DOMAIN_MAPPING = {
+    "Motor Skills": ["ITEM_19", "ITEM_20", "ITEM_21"],
+    "Early Literacy Skills": ["ITEM_13", "ITEM_14", "ITEM_15", "ITEM_16", "ITEM_17", "ITEM_18"],
+    "Early Numeracy Skills": ["ITEM_2", "ITEM_3", "ITEM_4", "ITEM_5", "ITEM_6", "ITEM_7"],
+    "Social Emotional Skills": ["ITEM_1", "ITEM_8", "ITEM_9", "ITEM_10", "ITEM_11", "ITEM_12"],
+}
+
 
 def question_mapping_label(question_col: str) -> str:
     """Show question IDs with English and Arabic descriptions during mapping."""
@@ -115,6 +222,7 @@ def init_state():
         "upload_type": None,
         "column_mapping": {},
         "mapped_df": None,
+        "download_raw_df": None,
         "filtered_df": None,
         "clean_base": None,
         "scored_df": None,
@@ -359,6 +467,78 @@ def create_by_question(clean_df: pd.DataFrame, baseline_cols: List[str]) -> pd.D
     return out
 
 
+
+def create_by_item(clean_df: pd.DataFrame) -> pd.DataFrame:
+    """Create item-level baseline/endline/comparison scores per row."""
+    out = clean_df[[c for c in META_COLUMNS if c in clean_df.columns]].copy()
+    item_score_cols_base = []
+    item_score_cols_end = []
+
+    ordered_items = [f"ITEM_{i}" for i in range(1, 22)]
+    for item_id in ordered_items:
+        item_name = ITEM_NAMES.get(item_id, item_id)
+        base_questions = [q for q, item in ITEM_MAPPING.items() if item == item_id and q in clean_df.columns]
+        end_questions = [f"{q}_post" for q, item in ITEM_MAPPING.items() if item == item_id and f"{q}_post" in clean_df.columns]
+
+        base_col_name = f"{item_id} {item_name} baseline"
+        end_col_name = f"{item_id} {item_name} endline"
+        comp_col_name = f"{item_id} {item_name} comparison"
+
+        if base_questions:
+            out[base_col_name] = clean_df[base_questions].apply(pd.to_numeric, errors="coerce").sum(axis=1)
+        else:
+            out[base_col_name] = 0
+
+        if end_questions:
+            out[end_col_name] = clean_df[end_questions].apply(pd.to_numeric, errors="coerce").sum(axis=1)
+        else:
+            out[end_col_name] = 0
+
+        out[comp_col_name] = out[end_col_name] - out[base_col_name]
+        item_score_cols_base.append(base_col_name)
+        item_score_cols_end.append(end_col_name)
+
+    out["baseline idela score"] = out[item_score_cols_base].sum(axis=1) if item_score_cols_base else 0
+    out["endline idela score"] = out[item_score_cols_end].sum(axis=1) if item_score_cols_end else 0
+    out["idela score"] = out["endline idela score"] - out["baseline idela score"]
+    return out
+
+
+def create_by_domain(by_item_df: pd.DataFrame) -> pd.DataFrame:
+    """Create domain-level baseline/endline/comparison scores using item scores."""
+    out = by_item_df[[c for c in META_COLUMNS if c in by_item_df.columns]].copy()
+    domain_base_cols = []
+    domain_end_cols = []
+
+    for domain_name, items in DOMAIN_MAPPING.items():
+        item_base_cols = []
+        item_end_cols = []
+        for item_id in items:
+            item_name = ITEM_NAMES.get(item_id, item_id)
+            base_col = f"{item_id} {item_name} baseline"
+            end_col = f"{item_id} {item_name} endline"
+            if base_col in by_item_df.columns:
+                item_base_cols.append(base_col)
+            if end_col in by_item_df.columns:
+                item_end_cols.append(end_col)
+
+        base_domain_col = f"{domain_name} baseline"
+        end_domain_col = f"{domain_name} endline"
+        comp_domain_col = f"{domain_name} comparison"
+
+        out[base_domain_col] = by_item_df[item_base_cols].sum(axis=1) if item_base_cols else 0
+        out[end_domain_col] = by_item_df[item_end_cols].sum(axis=1) if item_end_cols else 0
+        out[comp_domain_col] = out[end_domain_col] - out[base_domain_col]
+
+        domain_base_cols.append(base_domain_col)
+        domain_end_cols.append(end_domain_col)
+
+    out["baseline idela score"] = out[domain_base_cols].sum(axis=1) if domain_base_cols else 0
+    out["endline idela score"] = out[domain_end_cols].sum(axis=1) if domain_end_cols else 0
+    out["idela score"] = out["endline idela score"] - out["baseline idela score"]
+    return out
+
+
 def to_excel_bytes(sheets: Dict[str, pd.DataFrame]) -> bytes:
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
@@ -396,10 +576,29 @@ def show_progress():
     st.write(" → ".join([f"**{x}**" if i + 1 == current else x for i, x in enumerate(labels)]))
 
 
+def mapping_scope(key: str) -> str:
+    """Keep dropdown de-duplication within the same uploaded source only."""
+    if key == "base_id" or key.startswith("base_"):
+        return "baseline_file"
+    if key == "end_id" or key.startswith("end_"):
+        return "endline_file"
+    return "current_file"
+
+
 def selectbox_mapping(label: str, req_col: str, uploaded_cols: List[str], key: str, mapping: Dict[str, str], endline_hint: bool = False):
-    options = [""] + uploaded_cols
-    suggested = mapping.get(key, suggest_column(req_col, uploaded_cols, endline_hint=endline_hint))
-    index = options.index(suggested) if suggested in options else 0
+    # Make mapping easier: once an uploaded column is selected elsewhere in the same file/source,
+    # remove it from the current dropdown. Keep the current selection visible so users can change it.
+    current_scope = mapping_scope(key)
+    current_value = mapping.get(key, suggest_column(req_col, uploaded_cols, endline_hint=endline_hint))
+    selected_elsewhere = {
+        v for k, v in mapping.items()
+        if k != key and mapping_scope(k) == current_scope and v and v in uploaded_cols
+    }
+    available_cols = [c for c in uploaded_cols if c not in selected_elsewhere or c == current_value]
+    options = [""] + available_cols
+    if current_value not in options:
+        current_value = ""
+    index = options.index(current_value) if current_value in options else 0
     mapping[key] = st.selectbox(label, options=options, index=index, key=f"map_{key}")
 
 
@@ -494,6 +693,7 @@ if st.session_state.step == 1:
             sheet_name = st.selectbox("Select raw data sheet", xl.sheet_names, key="same_sheet")
             raw_df = read_excel_file(uploaded_file, sheet_name)
             st.session_state.raw_df = raw_df
+            st.session_state.download_raw_df = raw_df.copy()
             st.success(f"Loaded {len(raw_df)} rows and {len(raw_df.columns)} columns.")
             st.dataframe(raw_df.head(10), use_container_width=True)
             if st.button("Next: Map columns", type="primary"):
@@ -521,6 +721,9 @@ if st.session_state.step == 1:
                 st.dataframe(end_df.head(5), use_container_width=True)
             st.session_state.base_df = base_df
             st.session_state.end_df = end_df
+            base_raw = base_df.copy(); base_raw.insert(0, "__source_file__", "baseline")
+            end_raw = end_df.copy(); end_raw.insert(0, "__source_file__", "endline")
+            st.session_state.download_raw_df = pd.concat([base_raw, end_raw], ignore_index=True, sort=False)
             if st.button("Next: Map columns", type="primary"):
                 go_next()
 
@@ -531,6 +734,7 @@ if st.session_state.step == 1:
             sheet_name = st.selectbox("Select raw data sheet", xl.sheet_names, key="dup_sheet")
             raw_df = read_excel_file(uploaded_file, sheet_name)
             st.session_state.raw_df = raw_df
+            st.session_state.download_raw_df = raw_df.copy()
             st.success(f"Loaded {len(raw_df)} rows and {len(raw_df.columns)} columns.")
             st.dataframe(raw_df.head(10), use_container_width=True)
             if st.button("Next: Map columns", type="primary"):
@@ -971,8 +1175,19 @@ elif st.session_state.step == 6:
     filtered_df = st.session_state.filtered_df.copy()
     actions = st.session_state.actions
 
+    # Final analysis data applies both types of actions:
+    # - change missing to 0
+    # - drop selected questions
     clean_df = apply_actions(clean_base, actions)
+
+    # Cleaned data sheet requested by user: after removing rows, before removing question columns.
+    # It still applies the "change missing to 0" actions, but does not drop columns.
+    zero_only_actions = {q: a for q, a in actions.items() if a == "change missing to 0"}
+    cleaned_data_sheet = apply_actions(clean_base, zero_only_actions)
+
     by_question_df = create_by_question(clean_df, BASELINE_QUESTION_COLS)
+    by_item_df = create_by_item(clean_df)
+    by_domain_df = create_by_domain(by_item_df)
 
     st.write("Clean data preview")
     st.dataframe(clean_df.head(20), use_container_width=True)
@@ -985,16 +1200,18 @@ elif st.session_state.step == 6:
         st.error("Download is blocked. Missing is still in these columns:\n\n" + "\n".join(missing_columns))
         st.warning("Go back to Step 4 and choose an action for these question columns, such as changing missing to 0 or dropping the question.")
     else:
+        raw_sheet = st.session_state.get("download_raw_df")
+        if raw_sheet is None:
+            raw_sheet = filtered_df
         sheets = {
-            "filtered on Idela": filtered_df,
-            "idela clean data set": clean_df,
+            "raw data": raw_sheet,
+            "Cleaned data": cleaned_data_sheet,
             "BY QUESTION": by_question_df,
-            "BY ITEM": pd.DataFrame(),
-            "BY DOMAIN": pd.DataFrame(),
-            "IDELA ANALYSIS": pd.DataFrame(),
+            "BY ITEM": by_item_df,
+            "BY DOMAIN": by_domain_df,
         }
         excel_bytes = to_excel_bytes(sheets)
-        st.success("No 999, ---, blank, or null values remain in the question columns. You can download the cleaned workbook.")
+        st.success("No 999, ---, blank, or null values remain in the remaining question columns. You can download the cleaned workbook.")
         st.download_button(
             label="Download cleaned IDELA workbook",
             data=excel_bytes,
