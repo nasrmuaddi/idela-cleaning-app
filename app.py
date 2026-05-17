@@ -758,12 +758,11 @@ def write_standard_sheet(writer, workbook, sheet_name: str, data: pd.DataFrame):
 
 
 def write_visual_dashboard(writer, workbook, sheet_name: str, source_df: pd.DataFrame, dashboard_title: str):
-    """Create a clean visual dashboard sheet with dropdowns and a chart.
+    """Create a clean visual dashboard sheet with dropdowns and a responsive chart.
 
-    Fixes applied:
-    - Uses a normal clustered column chart with percentage values instead of percent-stacked.
-    - Uses NA() for empty chart rows so Excel does not draw dozens of 0% bars.
-    - Hides the source/calculation area so users see only the dashboard.
+    This version avoids #N/A helper rows completely.
+    It uses Excel dynamic FILTER named ranges, so the chart only receives
+    the categories that match the selected dropdowns.
     """
     source_name = ("_" + sheet_name.replace(" DASHBOARD", " DATA"))[:31]
     source_df.to_excel(writer, sheet_name=source_name, index=False)
@@ -819,26 +818,17 @@ def write_visual_dashboard(writer, workbook, sheet_name: str, source_df: pd.Data
     dash_ws.write_formula("E9", f'=IFERROR(SUMIFS(\'{source_name}\'!$H$2:$H${max_source_row},\'{source_name}\'!$B$2:$B${max_source_row},$B$3,\'{source_name}\'!$D$2:$D${max_source_row},$B$4)/$A$9,0)', pct_fmt)
     dash_ws.write_formula("G9", f'=IFERROR(SUMIFS(\'{source_name}\'!$J$2:$J${max_source_row},\'{source_name}\'!$B$2:$B${max_source_row},$B$3,\'{source_name}\'!$D$2:$D${max_source_row},$B$4)/$A$9,0)', pct_fmt)
 
-    # Hidden chart source table in X:AA.
-    # The chart uses dynamic named ranges so it only plots visible categories
-    # after the user changes the dropdowns. This prevents the many 0%/#N/A bars.
+    # Small visible chart source table. It uses FILTER spill formulas.
+    # This is the key fix: no fixed 40-row range, no #N/A rows, no 0% fake categories.
     headers = ["Category", "Improved", "No change", "Decreased"]
     for idx, h in enumerate(headers, start=23):
         dash_ws.write(0, idx, h, hidden_header_fmt)
 
-    max_chart_rows = 40
-    filter_condition = f"(\'{source_name}\'!$B$2:$B${max_source_row}=$B$3)*(\'{source_name}\'!$D$2:$D${max_source_row}=$B$4)"
-
-    for row in range(2, max_chart_rows + 2):
-        excel_row = row
-        idx_formula = f"ROW(A{row-1})"
-        cat_formula = f'=IFERROR(INDEX(FILTER(\'{source_name}\'!$C$2:$C${max_source_row},{filter_condition}),{idx_formula}),"")'
-        dash_ws.write_formula(excel_row - 1, 23, cat_formula)
-
-        # Use percentages directly from the source table: G, I, K.
-        for col_idx, source_col in zip([24, 25, 26], ["G", "I", "K"]):
-            value_formula = f'=IF($X{excel_row}="",NA(),IFERROR(INDEX(FILTER(\'{source_name}\'!${source_col}$2:${source_col}${max_source_row},{filter_condition}),{idx_formula}),NA()))'
-            dash_ws.write_formula(excel_row - 1, col_idx, value_formula, pct_fmt)
+    condition = f"(\'{source_name}\'!$B$2:$B${max_source_row}=$B$3)*(\'{source_name}\'!$D$2:$D${max_source_row}=$B$4)"
+    dash_ws.write_formula("X2", f'=FILTER(\'{source_name}\'!$C$2:$C${max_source_row},{condition},"")')
+    dash_ws.write_formula("Y2", f'=FILTER(\'{source_name}\'!$G$2:$G${max_source_row},{condition},0)', pct_fmt)
+    dash_ws.write_formula("Z2", f'=FILTER(\'{source_name}\'!$I$2:$I${max_source_row},{condition},0)', pct_fmt)
+    dash_ws.write_formula("AA2", f'=FILTER(\'{source_name}\'!$K$2:$K${max_source_row},{condition},0)', pct_fmt)
 
     chart_sheet = sheet_name[:31]
     safe_prefix = sheet_name.replace(" ", "_").replace("-", "_")[:20]
@@ -847,12 +837,11 @@ def write_visual_dashboard(writer, workbook, sheet_name: str, source_df: pd.Data
     same_name = f"{safe_prefix}_SAME"
     dec_name = f"{safe_prefix}_DEC"
 
-    # Count only non-empty category labels. Formulas returning "" are ignored.
-    height_formula = f"COUNTIF('{chart_sheet}'!$X$2:$X${max_chart_rows+1},\"?*\")"
-    workbook.define_name(cat_name, f"=OFFSET('{chart_sheet}'!$X$2,0,0,{height_formula},1)")
-    workbook.define_name(imp_name, f"=OFFSET('{chart_sheet}'!$Y$2,0,0,{height_formula},1)")
-    workbook.define_name(same_name, f"=OFFSET('{chart_sheet}'!$Z$2,0,0,{height_formula},1)")
-    workbook.define_name(dec_name, f"=OFFSET('{chart_sheet}'!$AA$2,0,0,{height_formula},1)")
+    # Dynamic spilled ranges. Excel will recalculate these when dropdowns change.
+    workbook.define_name(cat_name, f"='{chart_sheet}'!$X$2#")
+    workbook.define_name(imp_name, f"='{chart_sheet}'!$Y$2#")
+    workbook.define_name(same_name, f"='{chart_sheet}'!$Z$2#")
+    workbook.define_name(dec_name, f"='{chart_sheet}'!$AA$2#")
 
     chart = workbook.add_chart({"type": "column"})
     chart.add_series({
@@ -884,8 +873,9 @@ def write_visual_dashboard(writer, workbook, sheet_name: str, source_df: pd.Data
     dash_ws.set_column("A:A", 30)
     dash_ws.set_column("B:B", 45)
     dash_ws.set_column("C:H", 16)
-    dash_ws.set_column("M:AA", None, None, {"hidden": True})
-
+    dash_ws.set_column("M:N", None, None, {"hidden": True})
+    # Keep X:AA visible but far to the right for transparency/debugging. Hide it if preferred.
+    dash_ws.set_column("X:AA", 14)
 
 def to_excel_bytes(sheets: Dict[str, pd.DataFrame]) -> bytes:
     output = io.BytesIO()
