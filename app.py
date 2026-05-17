@@ -143,10 +143,31 @@ def normalize_name(name: str) -> str:
 
 
 def suggest_column(required_col: str, uploaded_cols: List[str], endline_hint: bool = False) -> str:
+    """Suggest a source column. This avoids bad defaults like mapping caseid to row number."""
     if required_col in uploaded_cols:
         return required_col
+
     req_norm = normalize_name(required_col)
     norm_lookup = {normalize_name(c): c for c in uploaded_cols}
+
+    # Strong ID preferences first
+    if required_col in ["caseid", "dup_id", "base_id", "end_id"] or "caseid" in req_norm:
+        preferred_tokens = ["caseid", "case_id", "case.case_id", "form.case.@case_id", "beneficiaryid", "beneficiary_id", "childid", "child_id"]
+        for col in uploaded_cols:
+            col_norm = normalize_name(col)
+            if any(normalize_name(tok) in col_norm for tok in preferred_tokens):
+                return col
+        # Do NOT auto-select generic columns like number/formid/enumerator as an ID
+        return ""
+
+    # Round/status column preferences
+    if required_col in ["round", "round_col"] or "round" in req_norm:
+        for col in uploaded_cols:
+            col_norm = normalize_name(col)
+            if any(tok in col_norm for tok in ["surveytype", "assessmenttype", "round", "status", "baselineendline"]):
+                return col
+        return ""
+
     if req_norm in norm_lookup:
         return norm_lookup[req_norm]
 
@@ -159,8 +180,14 @@ def suggest_column(required_col: str, uploaded_cols: List[str], endline_hint: bo
         if hinted:
             candidates = hinted
 
-    candidate_norms = []
+    # Match question label text when uploaded headers are long English/Arabic questions.
+    label = QUESTION_LABELS.get(base_req, "")
+    label_parts = []
+    if label:
+        label_parts = [part.strip() for part in label.split(" | ") if part.strip()]
+
     clean_lookup = {}
+    candidate_norms = []
     for c in candidates:
         n = normalize_name(c)
         n_clean = n.replace("post", "").replace("endline", "").replace("followup", "").replace("baseline", "").replace("base", "")
@@ -169,6 +196,21 @@ def suggest_column(required_col: str, uploaded_cols: List[str], endline_hint: bo
 
     if base_norm in clean_lookup:
         return clean_lookup[base_norm]
+
+    search_norms = [base_norm] + [normalize_name(x) for x in label_parts]
+    best_match = ""
+    best_ratio = 0
+    for search_norm in search_norms:
+        if not search_norm:
+            continue
+        for cand_norm in candidate_norms:
+            ratio = difflib.SequenceMatcher(None, search_norm, cand_norm).ratio()
+            if ratio > best_ratio:
+                best_ratio = ratio
+                best_match = cand_norm
+
+    if best_ratio >= 0.55 and best_match in clean_lookup:
+        return clean_lookup[best_match]
 
     matches = difflib.get_close_matches(base_norm, candidate_norms, n=1, cutoff=0.76)
     return clean_lookup.get(matches[0], "") if matches else ""
@@ -642,41 +684,50 @@ elif st.session_state.step == 3:
             if st.button("Next: Review rows", type="primary"):
                 go_next()
     else:
-        st.warning("Some question values are text/not scored. Enter the numeric score for each uploaded value.")
+        st.warning("Some question values are text/not scored. Choose the numeric score for each uploaded value.")
+        st.caption("This page is now using direct input boxes instead of a table editor, so every value can be changed reliably.")
+
         unique_values = (
             unscored_df.groupby("Uploaded value", as_index=False)
             .agg({"Rows": "sum", "Column": lambda x: ", ".join(sorted(set(x))[:5]) + ("..." if len(set(x)) > 5 else "")})
             .rename(columns={"Column": "Example columns", "Rows": "Total rows"})
         )
 
-        recode_rows = []
         saved = st.session_state.value_recode_mapping or {}
-        for _, row in unique_values.iterrows():
-            uploaded_value = row["Uploaded value"]
+        recode_mapping = {}
+
+        st.markdown("#### Enter scoring rules")
+        st.info("Recommended: correct/true/yes = 1, incorrect/not_true/no = 0, no_response/---/blank = 999 if you want to handle missing later.")
+
+        header = st.columns([2, 1, 1, 4])
+        header[0].markdown("**Uploaded value**")
+        header[1].markdown("**Score**")
+        header[2].markdown("**Rows**")
+        header[3].markdown("**Example columns**")
+
+        for i, row in unique_values.iterrows():
+            uploaded_value = str(row["Uploaded value"])
             suggestion = saved.get(uploaded_value, default_score_suggestion(uploaded_value))
-            recode_rows.append({
-                "Uploaded value": uploaded_value,
-                "Replacement score": "" if suggestion is None else suggestion,
-                "Total rows": row["Total rows"],
-                "Example columns": row["Example columns"],
-            })
+            if suggestion is None:
+                suggestion = 999
 
-        recode_df = pd.DataFrame(recode_rows)
-        edited_recode = st.data_editor(
-            recode_df,
-            column_config={
-                "Uploaded value": st.column_config.TextColumn("Uploaded value", disabled=True),
-                "Replacement score": st.column_config.NumberColumn("Replacement score", help="Example: correct = 1, incorrect = 0, no response = 999 or 0 based on your rule."),
-                "Total rows": st.column_config.NumberColumn("Total rows", disabled=True),
-                "Example columns": st.column_config.TextColumn("Example columns", disabled=True),
-            },
-            disabled=["Uploaded value", "Total rows", "Example columns"],
-            hide_index=True,
-            use_container_width=True,
-            key="value_recode_editor",
-        )
-
-        st.info("Use 999 if the value should remain missing and be handled later in Question Actions. Use 0 if you want to score it as zero.")
+            c1, c2, c3, c4 = st.columns([2, 1, 1, 4])
+            with c1:
+                st.code(uploaded_value, language=None)
+            with c2:
+                score = st.number_input(
+                    label=f"Score for {uploaded_value}",
+                    value=float(suggestion),
+                    step=1.0,
+                    key=f"score_value_{i}_{normalize_name(uploaded_value)[:30]}",
+                    label_visibility="collapsed",
+                )
+                # Store as int when possible
+                recode_mapping[uploaded_value] = int(score) if float(score).is_integer() else score
+            with c3:
+                st.write(int(row["Total rows"]))
+            with c4:
+                st.caption(str(row["Example columns"]))
 
         c1, c2 = st.columns(2)
         with c1:
@@ -684,19 +735,15 @@ elif st.session_state.step == 3:
                 go_back()
         with c2:
             if st.button("Apply scores and continue", type="primary"):
-                missing_scores = edited_recode[edited_recode["Replacement score"].isna() | (edited_recode["Replacement score"].astype("string").str.strip() == "")]
-                if len(missing_scores) > 0:
-                    st.error("Please enter a replacement score for every uploaded value before continuing.")
+                st.session_state.value_recode_mapping = recode_mapping
+                scored_df = apply_value_recode(mapped_df, all_question_cols, recode_mapping)
+                remaining_unscored = detect_unscored_values(scored_df, all_question_cols)
+                if len(remaining_unscored) > 0:
+                    st.error("Some text values are still not scored. Please review the list again.")
+                    st.dataframe(remaining_unscored, use_container_width=True)
                 else:
-                    recode_mapping = dict(zip(edited_recode["Uploaded value"], edited_recode["Replacement score"]))
-                    st.session_state.value_recode_mapping = recode_mapping
-                    scored_df = apply_value_recode(mapped_df, all_question_cols, recode_mapping)
-                    remaining_unscored = detect_unscored_values(scored_df, all_question_cols)
-                    if len(remaining_unscored) > 0:
-                        st.error("Some text values are still not scored. Please review the list again.")
-                    else:
-                        st.session_state.scored_df = scored_df
-                        go_next()
+                    st.session_state.scored_df = scored_df
+                    go_next()
 
 # STEP 4: Row review
 elif st.session_state.step == 4:
