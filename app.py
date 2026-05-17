@@ -732,25 +732,126 @@ def create_idela_dashboard(by_item_df: pd.DataFrame) -> pd.DataFrame:
     return create_status_dashboard(by_item_df, {"IDELA score": "idela score status"}, "IDELA score analysis")
 
 
+def write_standard_sheet(writer, workbook, sheet_name: str, data: pd.DataFrame):
+    safe_name = sheet_name[:31]
+    data.to_excel(writer, sheet_name=safe_name, index=False)
+    worksheet = writer.sheets[safe_name]
+    header_format = workbook.add_format({"bold": True, "bg_color": "#D9EAD3", "border": 1})
+    percent_format = workbook.add_format({"num_format": "0.0%"})
+    for col_num, value in enumerate(data.columns.values):
+        worksheet.write(0, col_num, value, header_format)
+        worksheet.set_column(col_num, col_num, min(max(len(str(value)) + 2, 12), 45))
+        if "%" in str(value).lower():
+            worksheet.set_column(col_num, col_num, 18, percent_format)
+    worksheet.autofilter(0, 0, max(len(data), 1), max(len(data.columns) - 1, 0))
+    worksheet.freeze_panes(1, 0)
+
+
+def write_visual_dashboard(writer, workbook, sheet_name: str, source_df: pd.DataFrame, dashboard_title: str):
+    """Create a visual dashboard sheet with dropdowns and a chart, while hiding the source table."""
+    source_name = ("_" + sheet_name.replace(" DASHBOARD", " DATA"))[:31]
+    source_df.to_excel(writer, sheet_name=source_name, index=False)
+    source_ws = writer.sheets[source_name]
+    source_ws.hide()
+
+    dash_ws = workbook.add_worksheet(sheet_name[:31])
+    writer.sheets[sheet_name[:31]] = dash_ws
+
+    title_fmt = workbook.add_format({"bold": True, "font_size": 20, "font_color": "#1F4E78"})
+    label_fmt = workbook.add_format({"bold": True, "bg_color": "#EAF3F8", "border": 1})
+    card_fmt = workbook.add_format({"bold": True, "font_size": 12, "bg_color": "#F3F6FA", "border": 1, "align": "center"})
+    pct_fmt = workbook.add_format({"num_format": "0.0%", "align": "center", "border": 1})
+    count_fmt = workbook.add_format({"num_format": "#,##0", "align": "center", "border": 1})
+    hidden_header_fmt = workbook.add_format({"bold": True, "bg_color": "#D9EAD3", "border": 1})
+
+    dash_ws.write("A1", dashboard_title, title_fmt)
+    dash_ws.write("A3", "Select essential info column", label_fmt)
+    dash_ws.write("A4", "Select analysis", label_fmt)
+    dash_ws.write("A6", "This dashboard shows the percentage of children Improved, No change, and Decreased by the selected category.")
+
+    essential_values = [v for v in source_df.get("Essential info column", pd.Series(dtype=str)).dropna().astype(str).unique().tolist() if v != "Overall"]
+    if not essential_values:
+        essential_values = ["Overall"]
+    preferred = ["e_childs_sex", "idela_child_pwd", "sector", "program", "h_country", "governorate", "district"]
+    essential_values = sorted(essential_values, key=lambda x: (0 if x in preferred else 1, preferred.index(x) if x in preferred else x))
+
+    analysis_values = source_df.get("Analysis", pd.Series(dtype=str)).dropna().astype(str).unique().tolist()
+    if not analysis_values:
+        analysis_values = ["Analysis"]
+
+    # Helper lists and calculated table live in hidden columns M:Q and X:AA.
+    for i, val in enumerate(essential_values, start=2):
+        dash_ws.write(i - 1, 12, val)
+    for i, val in enumerate(analysis_values, start=2):
+        dash_ws.write(i - 1, 13, val)
+
+    dash_ws.write("B3", essential_values[0])
+    dash_ws.write("B4", analysis_values[0])
+    dash_ws.data_validation("B3", {"validate": "list", "source": f"=$M$2:$M${len(essential_values)+1}"})
+    dash_ws.data_validation("B4", {"validate": "list", "source": f"=$N$2:$N${len(analysis_values)+1}"})
+
+    # KPI cards.
+    dash_ws.merge_range("A8:B8", "Total counted", card_fmt)
+    dash_ws.merge_range("C8:D8", "Improved %", card_fmt)
+    dash_ws.merge_range("E8:F8", "No change %", card_fmt)
+    dash_ws.merge_range("G8:H8", "Decreased %", card_fmt)
+
+    max_source_row = len(source_df) + 1
+    dash_ws.write_formula("A9", f'=IFERROR(SUMIFS(\'{source_name}\'!$E$2:$E${max_source_row},\'{source_name}\'!$B$2:$B${max_source_row},$B$3,\'{source_name}\'!$D$2:$D${max_source_row},$B$4),0)', count_fmt)
+    dash_ws.write_formula("C9", f'=IFERROR(SUMIFS(\'{source_name}\'!$F$2:$F${max_source_row},\'{source_name}\'!$B$2:$B${max_source_row},$B$3,\'{source_name}\'!$D$2:$D${max_source_row},$B$4)/A9,0)', pct_fmt)
+    dash_ws.write_formula("E9", f'=IFERROR(SUMIFS(\'{source_name}\'!$H$2:$H${max_source_row},\'{source_name}\'!$B$2:$B${max_source_row},$B$3,\'{source_name}\'!$D$2:$D${max_source_row},$B$4)/A9,0)', pct_fmt)
+    dash_ws.write_formula("G9", f'=IFERROR(SUMIFS(\'{source_name}\'!$J$2:$J${max_source_row},\'{source_name}\'!$B$2:$B${max_source_row},$B$3,\'{source_name}\'!$D$2:$D${max_source_row},$B$4)/A9,0)', pct_fmt)
+
+    # Hidden chart source table.
+    headers = ["Category", "Improved", "No change", "Decreased"]
+    for idx, h in enumerate(headers, start=23):
+        dash_ws.write(0, idx, h, hidden_header_fmt)
+
+    for row in range(2, 62):
+        excel_row = row
+        idx_formula = f"ROW(A{row-1})"
+        dash_ws.write_formula(excel_row - 1, 23, f'=IFERROR(INDEX(FILTER(\'{source_name}\'!$C$2:$C${max_source_row},(\'{source_name}\'!$B$2:$B${max_source_row}=$B$3)*(\'{source_name}\'!$D$2:$D${max_source_row}=$B$4)),{idx_formula}),"")')
+        dash_ws.write_formula(excel_row - 1, 24, f'=IFERROR(INDEX(FILTER(\'{source_name}\'!$G$2:$G${max_source_row},(\'{source_name}\'!$B$2:$B${max_source_row}=$B$3)*(\'{source_name}\'!$D$2:$D${max_source_row}=$B$4)),{idx_formula}),0)')
+        dash_ws.write_formula(excel_row - 1, 25, f'=IFERROR(INDEX(FILTER(\'{source_name}\'!$I$2:$I${max_source_row},(\'{source_name}\'!$B$2:$B${max_source_row}=$B$3)*(\'{source_name}\'!$D$2:$D${max_source_row}=$B$4)),{idx_formula}),0)')
+        dash_ws.write_formula(excel_row - 1, 26, f'=IFERROR(INDEX(FILTER(\'{source_name}\'!$K$2:$K${max_source_row},(\'{source_name}\'!$B$2:$B${max_source_row}=$B$3)*(\'{source_name}\'!$D$2:$D${max_source_row}=$B$4)),{idx_formula}),0)')
+
+    chart = workbook.add_chart({"type": "column", "subtype": "percent_stacked"})
+    chart.add_series({"name": "=\'%s\'!$Y$1" % sheet_name[:31], "categories": "=\'%s\'!$X$2:$X$61" % sheet_name[:31], "values": "=\'%s\'!$Y$2:$Y$61" % sheet_name[:31], "data_labels": {"value": True, "num_format": "0%"}})
+    chart.add_series({"name": "=\'%s\'!$Z$1" % sheet_name[:31], "categories": "=\'%s\'!$X$2:$X$61" % sheet_name[:31], "values": "=\'%s\'!$Z$2:$Z$61" % sheet_name[:31], "data_labels": {"value": True, "num_format": "0%"}})
+    chart.add_series({"name": "=\'%s\'!$AA$1" % sheet_name[:31], "categories": "=\'%s\'!$X$2:$X$61" % sheet_name[:31], "values": "=\'%s\'!$AA$2:$AA$61" % sheet_name[:31], "data_labels": {"value": True, "num_format": "0%"}})
+    chart.set_title({"name": "Comparison status by selected category"})
+    chart.set_y_axis({"num_format": "0%", "major_unit": 0.2})
+    chart.set_x_axis({"name": "Category"})
+    chart.set_legend({"position": "bottom"})
+    chart.set_size({"width": 980, "height": 460})
+    try:
+        chart.show_hidden_data()
+    except Exception:
+        pass
+    dash_ws.insert_chart("A12", chart)
+
+    dash_ws.set_column("A:A", 28)
+    dash_ws.set_column("B:B", 35)
+    dash_ws.set_column("C:H", 16)
+    dash_ws.set_column("M:AA", None, None, {"hidden": True})
+
+
 def to_excel_bytes(sheets: Dict[str, pd.DataFrame]) -> bytes:
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+        workbook = writer.book
+        dashboard_sources = {}
         for sheet_name, data in sheets.items():
-            safe_name = sheet_name[:31]
-            data.to_excel(writer, sheet_name=safe_name, index=False)
-            workbook = writer.book
-            worksheet = writer.sheets[safe_name]
-            header_format = workbook.add_format({"bold": True, "bg_color": "#D9EAD3", "border": 1})
-            percent_format = workbook.add_format({"num_format": "0.0%"})
-            for col_num, value in enumerate(data.columns.values):
-                worksheet.write(0, col_num, value, header_format)
-                worksheet.set_column(col_num, col_num, min(max(len(str(value)) + 2, 12), 45))
-                if "%" in str(value).lower():
-                    worksheet.set_column(col_num, col_num, 18, percent_format)
-            worksheet.autofilter(0, 0, max(len(data), 1), max(len(data.columns) - 1, 0))
-            worksheet.freeze_panes(1, 0)
-    return output.getvalue()
+            if sheet_name in ["ITEM DASHBOARD", "DOMAIN DASHBOARD", "IDELA DASHBOARD"]:
+                dashboard_sources[sheet_name] = data
+            else:
+                write_standard_sheet(writer, workbook, sheet_name, data)
 
+        for sheet_name, data in dashboard_sources.items():
+            title = sheet_name.replace(" DASHBOARD", " Dashboard").title()
+            write_visual_dashboard(writer, workbook, sheet_name, data, title)
+
+    return output.getvalue()
 
 def go_next():
     st.session_state.step += 1
