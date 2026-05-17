@@ -647,6 +647,91 @@ def create_by_domain(by_item_df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def create_status_dashboard(df: pd.DataFrame, analysis_columns: Dict[str, str], dashboard_type: str) -> pd.DataFrame:
+    """
+    Create an Excel-friendly interactive dashboard source table.
+
+    Each row summarizes the comparison status distribution for one analysis column
+    by one essential-info column/value. Users can filter this sheet in Excel by
+    essential column, category value, item/domain, or status percentages.
+    """
+    essential_cols = [
+        c for c in META_COLUMNS
+        if c in df.columns and c not in ["caseid", "IDELA_date"]
+    ]
+    statuses = ["Improved", "No change", "Decreased"]
+    rows = []
+
+    for analysis_name, status_col in analysis_columns.items():
+        if status_col not in df.columns:
+            continue
+
+        status_series = df[status_col].fillna("No change").astype(str)
+
+        # Overall row, useful when no demographic/filter split is needed.
+        overall_counts = status_series.value_counts()
+        overall_total = int(overall_counts.reindex(statuses, fill_value=0).sum())
+        row = {
+            "Dashboard Type": dashboard_type,
+            "Essential info column": "Overall",
+            "Essential info value": "All children",
+            "Analysis": analysis_name,
+            "Total counted": overall_total,
+        }
+        for status in statuses:
+            count = int(overall_counts.get(status, 0))
+            row[f"{status} count"] = count
+            row[f"{status} %"] = count / overall_total if overall_total else 0
+        rows.append(row)
+
+        for essential_col in essential_cols:
+            grouped = pd.DataFrame({
+                "group_value": df[essential_col].fillna("[blank]").astype(str).str.strip().replace({"": "[blank]"}),
+                "status": status_series,
+            })
+
+            for group_value, group_df in grouped.groupby("group_value", dropna=False):
+                counts = group_df["status"].value_counts()
+                total = int(counts.reindex(statuses, fill_value=0).sum())
+                row = {
+                    "Dashboard Type": dashboard_type,
+                    "Essential info column": essential_col,
+                    "Essential info value": group_value,
+                    "Analysis": analysis_name,
+                    "Total counted": total,
+                }
+                for status in statuses:
+                    count = int(counts.get(status, 0))
+                    row[f"{status} count"] = count
+                    row[f"{status} %"] = count / total if total else 0
+                rows.append(row)
+
+    return pd.DataFrame(rows)
+
+
+def create_item_dashboard(by_item_df: pd.DataFrame) -> pd.DataFrame:
+    item_status_cols = {}
+    for item_id in [f"ITEM_{i}" for i in range(1, 22)]:
+        item_name = ITEM_NAMES.get(item_id, item_id)
+        status_col = f"{item_id} {item_name} comparison status"
+        if status_col in by_item_df.columns:
+            item_status_cols[f"{item_id} - {item_name}"] = status_col
+    return create_status_dashboard(by_item_df, item_status_cols, "Item analysis")
+
+
+def create_domain_dashboard(by_domain_df: pd.DataFrame) -> pd.DataFrame:
+    domain_status_cols = {}
+    for domain_name in DOMAIN_MAPPING.keys():
+        status_col = f"{domain_name} comparison status"
+        if status_col in by_domain_df.columns:
+            domain_status_cols[domain_name] = status_col
+    return create_status_dashboard(by_domain_df, domain_status_cols, "Domain analysis")
+
+
+def create_idela_dashboard(by_item_df: pd.DataFrame) -> pd.DataFrame:
+    return create_status_dashboard(by_item_df, {"IDELA score": "idela score status"}, "IDELA score analysis")
+
+
 def to_excel_bytes(sheets: Dict[str, pd.DataFrame]) -> bytes:
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
@@ -1466,12 +1551,19 @@ elif st.session_state.step == 6:
         raw_sheet = st.session_state.get("download_raw_df")
         if raw_sheet is None:
             raw_sheet = filtered_df
+        item_dashboard_df = create_item_dashboard(by_item_df)
+        domain_dashboard_df = create_domain_dashboard(by_domain_df)
+        idela_dashboard_df = create_idela_dashboard(by_item_df)
+
         sheets = {
             "raw data": raw_sheet,
             "Cleaned data": cleaned_data_sheet,
             "BY QUESTION": by_question_df,
             "BY ITEM": by_item_df,
             "BY DOMAIN": by_domain_df,
+            "ITEM DASHBOARD": item_dashboard_df,
+            "DOMAIN DASHBOARD": domain_dashboard_df,
+            "IDELA DASHBOARD": idela_dashboard_df,
         }
         excel_bytes = to_excel_bytes(sheets)
         st.success("No 999, ---, blank, or null values remain in the remaining question columns. You can download the cleaned workbook.")
