@@ -757,143 +757,146 @@ def write_standard_sheet(writer, workbook, sheet_name: str, data: pd.DataFrame):
     worksheet.freeze_panes(1, 0)
 
 
-def write_visual_dashboard(writer, workbook, sheet_name: str, source_df: pd.DataFrame, dashboard_title: str):
-    """Create a clean visual dashboard sheet with dropdowns and a responsive chart.
+def write_filterable_dashboard(writer, workbook, sheet_name: str, source_df: pd.DataFrame, dashboard_title: str):
+    """Create a dashboard sheet that works like a Pivot Chart using Excel filters.
 
-    This version avoids #N/A helper rows completely.
-    It uses Excel dynamic FILTER named ranges, so the chart only receives
-    the categories that match the selected dropdowns.
+    NOTE: Python libraries used in Streamlit cannot reliably create native Excel
+    PivotTables/PivotCharts. This design avoids formulas and #N/A problems by
+    writing a clean summary table and linking the chart directly to that table.
+    Users interact by filtering the table headers: Essential info column and Analysis.
+    Excel charts automatically ignore filtered/hidden rows, so the chart updates.
     """
-    source_name = ("_" + sheet_name.replace(" DASHBOARD", " DATA"))[:31]
-    source_df.to_excel(writer, sheet_name=source_name, index=False)
-    source_ws = writer.sheets[source_name]
-    source_ws.hide()
+    safe_name = sheet_name[:31]
+    df = source_df.copy()
 
-    dash_ws = workbook.add_worksheet(sheet_name[:31])
-    writer.sheets[sheet_name[:31]] = dash_ws
+    # Keep only dashboard rows with real category values.
+    if "Essential info column" in df.columns:
+        df = df[df["Essential info column"].astype(str).ne("Overall")].copy()
+
+    # Rename to clean pivot-style names.
+    rename_map = {
+        "Essential info column": "Filter: Essential info column",
+        "Essential info value": "Category",
+        "Analysis": "Filter: Analysis",
+        "Total counted": "Total counted",
+        "Improved %": "Improved",
+        "No change %": "No change",
+        "Decreased %": "Decreased",
+        "Improved count": "Improved count",
+        "No change count": "No change count",
+        "Decreased count": "Decreased count",
+    }
+    keep_cols = [c for c in rename_map if c in df.columns]
+    df = df[keep_cols].rename(columns=rename_map)
+
+    # Put important fields first and percentages last for charting.
+    ordered_cols = [
+        "Filter: Essential info column",
+        "Filter: Analysis",
+        "Category",
+        "Total counted",
+        "Improved count",
+        "No change count",
+        "Decreased count",
+        "Improved",
+        "No change",
+        "Decreased",
+    ]
+    df = df[[c for c in ordered_cols if c in df.columns]]
+
+    # Default filter selection: prefer gender if available, otherwise first essential column.
+    default_essential = None
+    if "Filter: Essential info column" in df.columns and len(df):
+        vals = df["Filter: Essential info column"].dropna().astype(str).unique().tolist()
+        default_essential = "e_childs_sex" if "e_childs_sex" in vals else vals[0]
+        df = pd.concat([
+            df[df["Filter: Essential info column"].astype(str).eq(default_essential)],
+            df[~df["Filter: Essential info column"].astype(str).eq(default_essential)],
+        ], ignore_index=True)
+
+    df.to_excel(writer, sheet_name=safe_name, startrow=4, index=False)
+    ws = writer.sheets[safe_name]
 
     title_fmt = workbook.add_format({"bold": True, "font_size": 20, "font_color": "#1F4E78"})
-    label_fmt = workbook.add_format({"bold": True, "bg_color": "#EAF3F8", "border": 1})
-    note_fmt = workbook.add_format({"font_color": "#666666"})
-    card_fmt = workbook.add_format({"bold": True, "font_size": 12, "bg_color": "#F3F6FA", "border": 1, "align": "center"})
-    pct_fmt = workbook.add_format({"num_format": "0.0%", "align": "center", "border": 1})
-    count_fmt = workbook.add_format({"num_format": "#,##0", "align": "center", "border": 1})
-    hidden_header_fmt = workbook.add_format({"bold": True, "bg_color": "#D9EAD3", "border": 1})
+    note_fmt = workbook.add_format({"font_color": "#666666", "italic": True})
+    header_fmt = workbook.add_format({"bold": True, "bg_color": "#D9EAD3", "border": 1})
+    pct_fmt = workbook.add_format({"num_format": "0.0%", "border": 1})
+    count_fmt = workbook.add_format({"num_format": "#,##0", "border": 1})
 
-    dash_ws.write("A1", dashboard_title, title_fmt)
-    dash_ws.write("A3", "Select essential info column", label_fmt)
-    dash_ws.write("A4", "Select analysis", label_fmt)
-    dash_ws.write("A6", "The chart shows the % of children by comparison status for the selected category.", note_fmt)
+    ws.write("A1", dashboard_title, title_fmt)
+    ws.write("A2", "Use the table filters below, like a pivot chart: filter Essential info column and Analysis. The chart updates with visible rows only.", note_fmt)
+    ws.write("A3", "Tip: choose one Essential info column and one Analysis from the filter arrows.", note_fmt)
 
-    essential_values = [v for v in source_df.get("Essential info column", pd.Series(dtype=str)).dropna().astype(str).unique().tolist() if v != "Overall"]
-    if not essential_values:
-        essential_values = ["Overall"]
-    preferred = ["e_childs_sex", "idela_child_pwd", "If_yes_due_to_pwd", "sector", "program", "teacher_location", "h_country", "child_status", "nationality", "district", "governorate", "sub_district"]
-    essential_values = sorted(essential_values, key=lambda x: (0 if x in preferred else 1, preferred.index(x) if x in preferred else str(x)))
+    # Format header and columns.
+    for c_idx, col_name in enumerate(df.columns):
+        ws.write(4, c_idx, col_name, header_fmt)
+        width = min(max(len(str(col_name)) + 4, 14), 44)
+        ws.set_column(c_idx, c_idx, width)
+        if col_name in ["Improved", "No change", "Decreased"]:
+            ws.set_column(c_idx, c_idx, 14, pct_fmt)
+        elif "count" in col_name.lower() or col_name == "Total counted":
+            ws.set_column(c_idx, c_idx, 14, count_fmt)
 
-    analysis_values = source_df.get("Analysis", pd.Series(dtype=str)).dropna().astype(str).unique().tolist()
-    if not analysis_values:
-        analysis_values = ["Analysis"]
+    nrows = max(len(df), 1)
+    ncols = max(len(df.columns), 1)
+    ws.autofilter(4, 0, 4 + nrows, ncols - 1)
+    ws.freeze_panes(5, 0)
 
-    # Helper dropdown lists in hidden columns M:N.
-    for i, val in enumerate(essential_values, start=2):
-        dash_ws.write(i - 1, 12, val)
-    for i, val in enumerate(analysis_values, start=2):
-        dash_ws.write(i - 1, 13, val)
+    # Apply default filters for first view, if we can.
+    if default_essential and "Filter: Essential info column" in df.columns:
+        ws.filter_column(0, f'x == "{default_essential}"')
+    if "Filter: Analysis" in df.columns and len(df):
+        default_analysis = df["Filter: Analysis"].dropna().astype(str).iloc[0]
+        ws.filter_column(1, f'x == "{default_analysis}"')
 
-    dash_ws.write("B3", essential_values[0])
-    dash_ws.write("B4", analysis_values[0])
-    dash_ws.data_validation("B3", {"validate": "list", "source": f"=$M$2:$M${len(essential_values)+1}"})
-    dash_ws.data_validation("B4", {"validate": "list", "source": f"=$N$2:$N${len(analysis_values)+1}"})
+    # Hide rows that do not match the default view, so the first chart view is clean.
+    if len(df) and default_essential and "Filter: Essential info column" in df.columns and "Filter: Analysis" in df.columns:
+        default_analysis = df["Filter: Analysis"].dropna().astype(str).iloc[0]
+        for r_idx, row in df.iterrows():
+            visible = (
+                str(row.get("Filter: Essential info column", "")) == str(default_essential)
+                and str(row.get("Filter: Analysis", "")) == str(default_analysis)
+            )
+            if not visible:
+                ws.set_row(5 + r_idx, options={"hidden": True})
 
-    # KPI cards.
-    dash_ws.merge_range("A8:B8", "Total counted", card_fmt)
-    dash_ws.merge_range("C8:D8", "Improved %", card_fmt)
-    dash_ws.merge_range("E8:F8", "No change %", card_fmt)
-    dash_ws.merge_range("G8:H8", "Decreased %", card_fmt)
+    # Add chart directly from the table range. It will respond to Excel filters.
+    col_index = {name: i for i, name in enumerate(df.columns)}
+    if all(k in col_index for k in ["Category", "Improved", "No change", "Decreased"]):
+        first_row = 5  # zero-based Excel row index where first data row starts in xlsxwriter notation
+        last_row = 4 + max(len(df), 1)
+        chart = workbook.add_chart({"type": "column"})
+        chart.add_series({
+            "name": "Improved",
+            "categories": [safe_name, first_row, col_index["Category"], last_row, col_index["Category"]],
+            "values": [safe_name, first_row, col_index["Improved"], last_row, col_index["Improved"]],
+            "data_labels": {"value": True, "num_format": "0%"},
+        })
+        chart.add_series({
+            "name": "No change",
+            "categories": [safe_name, first_row, col_index["Category"], last_row, col_index["Category"]],
+            "values": [safe_name, first_row, col_index["No change"], last_row, col_index["No change"]],
+            "data_labels": {"value": True, "num_format": "0%"},
+        })
+        chart.add_series({
+            "name": "Decreased",
+            "categories": [safe_name, first_row, col_index["Category"], last_row, col_index["Category"]],
+            "values": [safe_name, first_row, col_index["Decreased"], last_row, col_index["Decreased"]],
+            "data_labels": {"value": True, "num_format": "0%"},
+        })
+        chart.set_title({"name": "Comparison status by selected category"})
+        chart.set_y_axis({"num_format": "0%", "min": 0, "max": 1, "major_unit": 0.2})
+        chart.set_x_axis({"name": "Category"})
+        chart.set_legend({"position": "bottom"})
+        chart.set_size({"width": 980, "height": 460})
+        # Do not show data in hidden rows/columns. This is the key pivot-like behavior.
+        chart.show_hidden_data = False
+        ws.insert_chart("L5", chart)
 
-    max_source_row = len(source_df) + 1
-    dash_ws.write_formula("A9", f'=IFERROR(SUMIFS(\'{source_name}\'!$E$2:$E${max_source_row},\'{source_name}\'!$B$2:$B${max_source_row},$B$3,\'{source_name}\'!$D$2:$D${max_source_row},$B$4),0)', count_fmt)
-    dash_ws.write_formula("C9", f'=IFERROR(SUMIFS(\'{source_name}\'!$F$2:$F${max_source_row},\'{source_name}\'!$B$2:$B${max_source_row},$B$3,\'{source_name}\'!$D$2:$D${max_source_row},$B$4)/$A$9,0)', pct_fmt)
-    dash_ws.write_formula("E9", f'=IFERROR(SUMIFS(\'{source_name}\'!$H$2:$H${max_source_row},\'{source_name}\'!$B$2:$B${max_source_row},$B$3,\'{source_name}\'!$D$2:$D${max_source_row},$B$4)/$A$9,0)', pct_fmt)
-    dash_ws.write_formula("G9", f'=IFERROR(SUMIFS(\'{source_name}\'!$J$2:$J${max_source_row},\'{source_name}\'!$B$2:$B${max_source_row},$B$3,\'{source_name}\'!$D$2:$D${max_source_row},$B$4)/$A$9,0)', pct_fmt)
+    # Also add a small instruction block above chart.
+    ws.set_column("L:L", 4)
+    ws.set_column("M:U", 14)
 
-    # Small visible chart source table.
-    # IMPORTANT: Excel charts do not reliably refresh from dynamic spill references like X2#.
-    # So we write a fixed helper range with formulas that update when dropdowns change.
-    # Empty extra rows return blank / #N/A and are ignored by the chart.
-    headers = ["Category", "Improved", "No change", "Decreased"]
-    for idx, h in enumerate(headers, start=23):
-        dash_ws.write(0, idx, h, hidden_header_fmt)
-
-    condition = f"(\'{source_name}\'!$B$2:$B${max_source_row}=$B$3)*(\'{source_name}\'!$D$2:$D${max_source_row}=$B$4)"
-    max_chart_rows = 30
-
-    for r in range(2, max_chart_rows + 2):
-        k = r - 1
-        # Category
-        dash_ws.write_formula(
-            r - 1,
-            23,
-            f'=IFERROR(INDEX(FILTER(\'{source_name}\'!$C$2:$C${max_source_row},{condition}),{k}),"")'
-        )
-        # Improved %
-        dash_ws.write_formula(
-            r - 1,
-            24,
-            f'=IF($X{r}="",NA(),IFERROR(INDEX(FILTER(\'{source_name}\'!$G$2:$G${max_source_row},{condition}),{k}),NA()))',
-            pct_fmt
-        )
-        # No change %
-        dash_ws.write_formula(
-            r - 1,
-            25,
-            f'=IF($X{r}="",NA(),IFERROR(INDEX(FILTER(\'{source_name}\'!$I$2:$I${max_source_row},{condition}),{k}),NA()))',
-            pct_fmt
-        )
-        # Decreased %
-        dash_ws.write_formula(
-            r - 1,
-            26,
-            f'=IF($X{r}="",NA(),IFERROR(INDEX(FILTER(\'{source_name}\'!$K$2:$K${max_source_row},{condition}),{k}),NA()))',
-            pct_fmt
-        )
-
-    chart_sheet = sheet_name[:31]
-
-    chart = workbook.add_chart({"type": "column"})
-    chart.add_series({
-        "name": f"='{chart_sheet}'!$Y$1",
-        "categories": f"='{chart_sheet}'!$X$2:$X$31",
-        "values": f"='{chart_sheet}'!$Y$2:$Y$31",
-        "data_labels": {"value": True, "num_format": "0%"},
-        "gap": 80,
-    })
-    chart.add_series({
-        "name": f"='{chart_sheet}'!$Z$1",
-        "categories": f"='{chart_sheet}'!$X$2:$X$31",
-        "values": f"='{chart_sheet}'!$Z$2:$Z$31",
-        "data_labels": {"value": True, "num_format": "0%"},
-    })
-    chart.add_series({
-        "name": f"='{chart_sheet}'!$AA$1",
-        "categories": f"='{chart_sheet}'!$X$2:$X$31",
-        "values": f"='{chart_sheet}'!$AA$2:$AA$31",
-        "data_labels": {"value": True, "num_format": "0%"},
-    })
-    chart.set_title({"name": "Comparison status by selected category"})
-    chart.set_y_axis({"num_format": "0%", "min": 0, "max": 1, "major_unit": 0.2})
-    chart.set_x_axis({"name": "Category"})
-    chart.set_legend({"position": "bottom"})
-    chart.set_size({"width": 980, "height": 460})
-    dash_ws.insert_chart("A12", chart)
-
-    dash_ws.set_column("A:A", 30)
-    dash_ws.set_column("B:B", 45)
-    dash_ws.set_column("C:H", 16)
-    dash_ws.set_column("M:N", None, None, {"hidden": True})
-    # Keep X:AA visible but far to the right for transparency/debugging. Hide it if preferred.
-    dash_ws.set_column("X:AA", 14)
 
 def to_excel_bytes(sheets: Dict[str, pd.DataFrame]) -> bytes:
     output = io.BytesIO()
@@ -909,7 +912,7 @@ def to_excel_bytes(sheets: Dict[str, pd.DataFrame]) -> bytes:
 
         for sheet_name, data in dashboard_sources.items():
             title = sheet_name.replace(" DASHBOARD", " Dashboard").title()
-            write_visual_dashboard(writer, workbook, sheet_name, data, title)
+            write_filterable_dashboard(writer, workbook, sheet_name, data, title)
 
     return output.getvalue()
 
