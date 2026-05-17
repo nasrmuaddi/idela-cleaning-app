@@ -709,6 +709,16 @@ def create_status_dashboard(df: pd.DataFrame, analysis_columns: Dict[str, str], 
     return pd.DataFrame(rows)
 
 
+def create_question_dashboard(by_question_df: pd.DataFrame) -> pd.DataFrame:
+    question_status_cols = {}
+    suffix = " - comparison status"
+    for col in by_question_df.columns:
+        if col.endswith(suffix):
+            question_name = col[:-len(suffix)]
+            question_status_cols[question_name] = col
+    return create_status_dashboard(by_question_df, question_status_cols, "Question analysis")
+
+
 def create_item_dashboard(by_item_df: pd.DataFrame) -> pd.DataFrame:
     item_status_cols = {}
     for item_id in [f"ITEM_{i}" for i in range(1, 22)]:
@@ -748,7 +758,13 @@ def write_standard_sheet(writer, workbook, sheet_name: str, data: pd.DataFrame):
 
 
 def write_visual_dashboard(writer, workbook, sheet_name: str, source_df: pd.DataFrame, dashboard_title: str):
-    """Create a visual dashboard sheet with dropdowns and a chart, while hiding the source table."""
+    """Create a clean visual dashboard sheet with dropdowns and a chart.
+
+    Fixes applied:
+    - Uses a normal clustered column chart with percentage values instead of percent-stacked.
+    - Uses NA() for empty chart rows so Excel does not draw dozens of 0% bars.
+    - Hides the source/calculation area so users see only the dashboard.
+    """
     source_name = ("_" + sheet_name.replace(" DASHBOARD", " DATA"))[:31]
     source_df.to_excel(writer, sheet_name=source_name, index=False)
     source_ws = writer.sheets[source_name]
@@ -759,6 +775,7 @@ def write_visual_dashboard(writer, workbook, sheet_name: str, source_df: pd.Data
 
     title_fmt = workbook.add_format({"bold": True, "font_size": 20, "font_color": "#1F4E78"})
     label_fmt = workbook.add_format({"bold": True, "bg_color": "#EAF3F8", "border": 1})
+    note_fmt = workbook.add_format({"font_color": "#666666"})
     card_fmt = workbook.add_format({"bold": True, "font_size": 12, "bg_color": "#F3F6FA", "border": 1, "align": "center"})
     pct_fmt = workbook.add_format({"num_format": "0.0%", "align": "center", "border": 1})
     count_fmt = workbook.add_format({"num_format": "#,##0", "align": "center", "border": 1})
@@ -767,19 +784,19 @@ def write_visual_dashboard(writer, workbook, sheet_name: str, source_df: pd.Data
     dash_ws.write("A1", dashboard_title, title_fmt)
     dash_ws.write("A3", "Select essential info column", label_fmt)
     dash_ws.write("A4", "Select analysis", label_fmt)
-    dash_ws.write("A6", "This dashboard shows the percentage of children Improved, No change, and Decreased by the selected category.")
+    dash_ws.write("A6", "The chart shows the % of children by comparison status for the selected category.", note_fmt)
 
     essential_values = [v for v in source_df.get("Essential info column", pd.Series(dtype=str)).dropna().astype(str).unique().tolist() if v != "Overall"]
     if not essential_values:
         essential_values = ["Overall"]
-    preferred = ["e_childs_sex", "idela_child_pwd", "sector", "program", "h_country", "governorate", "district"]
-    essential_values = sorted(essential_values, key=lambda x: (0 if x in preferred else 1, preferred.index(x) if x in preferred else x))
+    preferred = ["e_childs_sex", "idela_child_pwd", "If_yes_due_to_pwd", "sector", "program", "teacher_location", "h_country", "child_status", "nationality", "district", "governorate", "sub_district"]
+    essential_values = sorted(essential_values, key=lambda x: (0 if x in preferred else 1, preferred.index(x) if x in preferred else str(x)))
 
     analysis_values = source_df.get("Analysis", pd.Series(dtype=str)).dropna().astype(str).unique().tolist()
     if not analysis_values:
         analysis_values = ["Analysis"]
 
-    # Helper lists and calculated table live in hidden columns M:Q and X:AA.
+    # Helper dropdown lists in hidden columns M:N.
     for i, val in enumerate(essential_values, start=2):
         dash_ws.write(i - 1, 12, val)
     for i, val in enumerate(analysis_values, start=2):
@@ -798,40 +815,59 @@ def write_visual_dashboard(writer, workbook, sheet_name: str, source_df: pd.Data
 
     max_source_row = len(source_df) + 1
     dash_ws.write_formula("A9", f'=IFERROR(SUMIFS(\'{source_name}\'!$E$2:$E${max_source_row},\'{source_name}\'!$B$2:$B${max_source_row},$B$3,\'{source_name}\'!$D$2:$D${max_source_row},$B$4),0)', count_fmt)
-    dash_ws.write_formula("C9", f'=IFERROR(SUMIFS(\'{source_name}\'!$F$2:$F${max_source_row},\'{source_name}\'!$B$2:$B${max_source_row},$B$3,\'{source_name}\'!$D$2:$D${max_source_row},$B$4)/A9,0)', pct_fmt)
-    dash_ws.write_formula("E9", f'=IFERROR(SUMIFS(\'{source_name}\'!$H$2:$H${max_source_row},\'{source_name}\'!$B$2:$B${max_source_row},$B$3,\'{source_name}\'!$D$2:$D${max_source_row},$B$4)/A9,0)', pct_fmt)
-    dash_ws.write_formula("G9", f'=IFERROR(SUMIFS(\'{source_name}\'!$J$2:$J${max_source_row},\'{source_name}\'!$B$2:$B${max_source_row},$B$3,\'{source_name}\'!$D$2:$D${max_source_row},$B$4)/A9,0)', pct_fmt)
+    dash_ws.write_formula("C9", f'=IFERROR(SUMIFS(\'{source_name}\'!$F$2:$F${max_source_row},\'{source_name}\'!$B$2:$B${max_source_row},$B$3,\'{source_name}\'!$D$2:$D${max_source_row},$B$4)/$A$9,0)', pct_fmt)
+    dash_ws.write_formula("E9", f'=IFERROR(SUMIFS(\'{source_name}\'!$H$2:$H${max_source_row},\'{source_name}\'!$B$2:$B${max_source_row},$B$3,\'{source_name}\'!$D$2:$D${max_source_row},$B$4)/$A$9,0)', pct_fmt)
+    dash_ws.write_formula("G9", f'=IFERROR(SUMIFS(\'{source_name}\'!$J$2:$J${max_source_row},\'{source_name}\'!$B$2:$B${max_source_row},$B$3,\'{source_name}\'!$D$2:$D${max_source_row},$B$4)/$A$9,0)', pct_fmt)
 
-    # Hidden chart source table.
+    # Hidden chart source table in X:AA.
+    # It intentionally returns NA() for unused rows to stop Excel from drawing many zero bars.
     headers = ["Category", "Improved", "No change", "Decreased"]
     for idx, h in enumerate(headers, start=23):
         dash_ws.write(0, idx, h, hidden_header_fmt)
 
-    for row in range(2, 62):
+    max_chart_rows = 40
+    for row in range(2, max_chart_rows + 2):
         excel_row = row
         idx_formula = f"ROW(A{row-1})"
-        dash_ws.write_formula(excel_row - 1, 23, f'=IFERROR(INDEX(FILTER(\'{source_name}\'!$C$2:$C${max_source_row},(\'{source_name}\'!$B$2:$B${max_source_row}=$B$3)*(\'{source_name}\'!$D$2:$D${max_source_row}=$B$4)),{idx_formula}),"")')
-        dash_ws.write_formula(excel_row - 1, 24, f'=IFERROR(INDEX(FILTER(\'{source_name}\'!$G$2:$G${max_source_row},(\'{source_name}\'!$B$2:$B${max_source_row}=$B$3)*(\'{source_name}\'!$D$2:$D${max_source_row}=$B$4)),{idx_formula}),0)')
-        dash_ws.write_formula(excel_row - 1, 25, f'=IFERROR(INDEX(FILTER(\'{source_name}\'!$I$2:$I${max_source_row},(\'{source_name}\'!$B$2:$B${max_source_row}=$B$3)*(\'{source_name}\'!$D$2:$D${max_source_row}=$B$4)),{idx_formula}),0)')
-        dash_ws.write_formula(excel_row - 1, 26, f'=IFERROR(INDEX(FILTER(\'{source_name}\'!$K$2:$K${max_source_row},(\'{source_name}\'!$B$2:$B${max_source_row}=$B$3)*(\'{source_name}\'!$D$2:$D${max_source_row}=$B$4)),{idx_formula}),0)')
+        filter_condition = f"(\'{source_name}\'!$B$2:$B${max_source_row}=$B$3)*(\'{source_name}\'!$D$2:$D${max_source_row}=$B$4)"
+        cat_formula = f'=IFERROR(INDEX(FILTER(\'{source_name}\'!$C$2:$C${max_source_row},{filter_condition}),{idx_formula}),"")'
+        dash_ws.write_formula(excel_row - 1, 23, cat_formula)
+        # Use percentages directly from the source table: G, I, K.
+        for col_idx, source_col in zip([24, 25, 26], ["G", "I", "K"]):
+            value_formula = f'=IF($X{excel_row}="",NA(),IFERROR(INDEX(FILTER(\'{source_name}\'!${source_col}$2:${source_col}${max_source_row},{filter_condition}),{idx_formula}),NA()))'
+            dash_ws.write_formula(excel_row - 1, col_idx, value_formula, pct_fmt)
 
-    chart = workbook.add_chart({"type": "column", "subtype": "percent_stacked"})
-    chart.add_series({"name": "=\'%s\'!$Y$1" % sheet_name[:31], "categories": "=\'%s\'!$X$2:$X$61" % sheet_name[:31], "values": "=\'%s\'!$Y$2:$Y$61" % sheet_name[:31], "data_labels": {"value": True, "num_format": "0%"}})
-    chart.add_series({"name": "=\'%s\'!$Z$1" % sheet_name[:31], "categories": "=\'%s\'!$X$2:$X$61" % sheet_name[:31], "values": "=\'%s\'!$Z$2:$Z$61" % sheet_name[:31], "data_labels": {"value": True, "num_format": "0%"}})
-    chart.add_series({"name": "=\'%s\'!$AA$1" % sheet_name[:31], "categories": "=\'%s\'!$X$2:$X$61" % sheet_name[:31], "values": "=\'%s\'!$AA$2:$AA$61" % sheet_name[:31], "data_labels": {"value": True, "num_format": "0%"}})
+    chart = workbook.add_chart({"type": "column"})
+    chart_sheet = sheet_name[:31]
+    last_chart_row = max_chart_rows + 1
+    chart.add_series({
+        "name": f"='{chart_sheet}'!$Y$1",
+        "categories": f"='{chart_sheet}'!$X$2:$X${last_chart_row}",
+        "values": f"='{chart_sheet}'!$Y$2:$Y${last_chart_row}",
+        "data_labels": {"value": True, "num_format": "0%"},
+        "gap": 80,
+    })
+    chart.add_series({
+        "name": f"='{chart_sheet}'!$Z$1",
+        "categories": f"='{chart_sheet}'!$X$2:$X${last_chart_row}",
+        "values": f"='{chart_sheet}'!$Z$2:$Z${last_chart_row}",
+        "data_labels": {"value": True, "num_format": "0%"},
+    })
+    chart.add_series({
+        "name": f"='{chart_sheet}'!$AA$1",
+        "categories": f"='{chart_sheet}'!$X$2:$X${last_chart_row}",
+        "values": f"='{chart_sheet}'!$AA$2:$AA${last_chart_row}",
+        "data_labels": {"value": True, "num_format": "0%"},
+    })
     chart.set_title({"name": "Comparison status by selected category"})
-    chart.set_y_axis({"num_format": "0%", "major_unit": 0.2})
+    chart.set_y_axis({"num_format": "0%", "min": 0, "max": 1, "major_unit": 0.2})
     chart.set_x_axis({"name": "Category"})
     chart.set_legend({"position": "bottom"})
     chart.set_size({"width": 980, "height": 460})
-    try:
-        chart.show_hidden_data()
-    except Exception:
-        pass
     dash_ws.insert_chart("A12", chart)
 
-    dash_ws.set_column("A:A", 28)
-    dash_ws.set_column("B:B", 35)
+    dash_ws.set_column("A:A", 30)
+    dash_ws.set_column("B:B", 45)
     dash_ws.set_column("C:H", 16)
     dash_ws.set_column("M:AA", None, None, {"hidden": True})
 
@@ -842,7 +878,7 @@ def to_excel_bytes(sheets: Dict[str, pd.DataFrame]) -> bytes:
         workbook = writer.book
         dashboard_sources = {}
         for sheet_name, data in sheets.items():
-            if sheet_name in ["ITEM DASHBOARD", "DOMAIN DASHBOARD", "IDELA DASHBOARD"]:
+            if sheet_name in ["QUESTION DASHBOARD", "ITEM DASHBOARD", "DOMAIN DASHBOARD", "IDELA DASHBOARD"]:
                 dashboard_sources[sheet_name] = data
             else:
                 write_standard_sheet(writer, workbook, sheet_name, data)
@@ -1652,6 +1688,7 @@ elif st.session_state.step == 6:
         raw_sheet = st.session_state.get("download_raw_df")
         if raw_sheet is None:
             raw_sheet = filtered_df
+        question_dashboard_df = create_question_dashboard(by_question_df)
         item_dashboard_df = create_item_dashboard(by_item_df)
         domain_dashboard_df = create_domain_dashboard(by_domain_df)
         idela_dashboard_df = create_idela_dashboard(by_item_df)
@@ -1662,6 +1699,7 @@ elif st.session_state.step == 6:
             "BY QUESTION": by_question_df,
             "BY ITEM": by_item_df,
             "BY DOMAIN": by_domain_df,
+            "QUESTION DASHBOARD": question_dashboard_df,
             "ITEM DASHBOARD": item_dashboard_df,
             "DOMAIN DASHBOARD": domain_dashboard_df,
             "IDELA DASHBOARD": idela_dashboard_df,
