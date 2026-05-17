@@ -838,26 +838,52 @@ elif st.session_state.step == 4:
 elif st.session_state.step == 5:
     st.subheader("Step 5: Question Missing Review and Actions")
     clean_base = st.session_state.clean_base.copy()
-    action_options = ["No action", "change missing to 0", "drop this question"]
+
+    action_options = ["change missing to 0", "drop this question"]
 
     question_review_rows = []
     for base_col in BASELINE_QUESTION_COLS:
         post_col = f"{base_col}_post"
         question_name = QUESTION_LABELS.get(base_col, base_col)
         arabic_name, english_name = question_name.split(" | ", 1) if " | " in question_name else ("", question_name)
+        base_missing = question_missing_pct(clean_base, base_col)
+        end_missing = question_missing_pct(clean_base, post_col)
+        default_action = "drop this question" if (base_missing >= 0.30 or end_missing >= 0.30) else "change missing to 0"
+
+        # Auto-fill default once, then keep any user edits.
+        if base_col not in st.session_state.actions:
+            st.session_state.actions[base_col] = default_action
+
         question_review_rows.append({
             "Baseline ID": base_col,
             "Endline ID": post_col,
             "Arabic": arabic_name,
             "English": english_name,
-            "% Missing Baseline": question_missing_pct(clean_base, base_col),
-            "% Missing Endline": question_missing_pct(clean_base, post_col),
-            "Action": st.session_state.actions.get(base_col, "No action"),
+            "% Missing Baseline": base_missing,
+            "% Missing Endline": end_missing,
+            "High Missing": "YES" if (base_missing >= 0.30 or end_missing >= 0.30) else "",
+            "Action": st.session_state.actions.get(base_col, default_action),
         })
 
     question_review_df = pd.DataFrame(question_review_rows)
+
+    # Enforce default drop for questions with >=30% missing unless user manually changes later.
+    high_missing_questions = question_review_df.loc[question_review_df["High Missing"].eq("YES"), "Baseline ID"].tolist()
+    if "high_missing_default_applied" not in st.session_state:
+        st.session_state.high_missing_default_applied = True
+        for q in high_missing_questions:
+            st.session_state.actions[q] = "drop this question"
+        question_review_df["Action"] = question_review_df["Baseline ID"].map(st.session_state.actions)
+
+    def highlight_high_missing(row):
+        if row["High Missing"] == "YES":
+            return ["background-color: #ffe5e5; color: #9f1239; font-weight: 600"] * len(row)
+        return [""] * len(row)
+
+    st.warning("Questions with baseline or endline missing percentage ≥ 30% are highlighted and defaulted to 'drop this question'.")
+
     edited_actions = st.data_editor(
-        question_review_df,
+        question_review_df.style.apply(highlight_high_missing, axis=1),
         column_config={
             "Baseline ID": st.column_config.TextColumn("Baseline ID", disabled=True),
             "Endline ID": st.column_config.TextColumn("Endline ID", disabled=True),
@@ -865,24 +891,57 @@ elif st.session_state.step == 5:
             "English": st.column_config.TextColumn("English", disabled=True),
             "% Missing Baseline": st.column_config.ProgressColumn("% Missing Baseline", format="%.1f%%", min_value=0, max_value=1),
             "% Missing Endline": st.column_config.ProgressColumn("% Missing Endline", format="%.1f%%", min_value=0, max_value=1),
+            "High Missing": st.column_config.TextColumn("High Missing", disabled=True),
             "Action": st.column_config.SelectboxColumn("Action", options=action_options, required=True),
         },
-        disabled=["Baseline ID", "Endline ID", "Arabic", "English", "% Missing Baseline", "% Missing Endline"],
+        disabled=["Baseline ID", "Endline ID", "Arabic", "English", "% Missing Baseline", "% Missing Endline", "High Missing"],
         hide_index=True,
         use_container_width=True,
-        key="question_action_editor",
+        key="question_action_editor_v2",
     )
 
     st.session_state.actions = dict(zip(edited_actions["Baseline ID"], edited_actions["Action"]))
-    st.info("If you choose 'drop this question', both the baseline question and its matching endline question are removed.")
+
+    dropped_questions = edited_actions.loc[edited_actions["Action"].eq("drop this question"), ["Baseline ID", "Endline ID", "English", "Arabic"]].copy()
+    st.info("Only two actions are available: change missing to 0 or drop this question.")
+
+    def confirm_and_continue():
+        st.session_state.confirm_drop_questions = True
+        go_next()
+
+    if hasattr(st, "dialog"):
+        @st.dialog("Confirm dropped questions")
+        def show_drop_confirmation():
+            if len(dropped_questions) == 0:
+                st.success("No questions will be dropped.")
+            else:
+                st.warning(f"The following {len(dropped_questions)} question(s) will be dropped from baseline and endline:")
+                st.dataframe(dropped_questions, hide_index=True, use_container_width=True)
+            if st.button("Confirm and continue to download", type="primary"):
+                confirm_and_continue()
+    else:
+        show_drop_confirmation = None
 
     c1, c2 = st.columns(2)
     with c1:
         if st.button("Back"):
             go_back()
     with c2:
-        if st.button("Next: Download", type="primary"):
-            go_next()
+        if st.button("Finish actions", type="primary"):
+            if hasattr(st, "dialog"):
+                show_drop_confirmation()
+            else:
+                st.session_state.show_drop_confirmation_inline = True
+
+    if st.session_state.get("show_drop_confirmation_inline", False):
+        st.warning("Confirm dropped questions before continuing.")
+        if len(dropped_questions) == 0:
+            st.success("No questions will be dropped.")
+        else:
+            st.dataframe(dropped_questions, hide_index=True, use_container_width=True)
+        if st.button("Confirm and continue to download", type="primary"):
+            st.session_state.show_drop_confirmation_inline = False
+            confirm_and_continue()
 
 # STEP 6: Download
 elif st.session_state.step == 6:
