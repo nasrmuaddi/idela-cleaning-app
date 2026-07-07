@@ -248,6 +248,8 @@ def init_state():
         "value_recode_mapping": {},
         "actions": {},
         "selected_delete_indices": set(),
+        "idela_date_filter_column": None,
+        "idela_date_filter_summary": {},
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -263,6 +265,8 @@ def reset_after_upload_type_change():
     st.session_state.value_recode_mapping = {}
     st.session_state.actions = {}
     st.session_state.selected_delete_indices = set()
+    st.session_state.idela_date_filter_column = None
+    st.session_state.idela_date_filter_summary = {}
 
 
 def normalize_name(name: str) -> str:
@@ -1077,6 +1081,41 @@ def show_duplicated_rows_count_summary(raw_df: pd.DataFrame, id_col: str, round_
     }
     show_analysis_count_summary(total_children, len(paired), reasons, details)
 
+
+def idela_date_exists_mask(df: pd.DataFrame, date_col: str) -> pd.Series:
+    """Return True for rows where the selected IDELA date field has a usable value."""
+    if not date_col or date_col not in df.columns:
+        return pd.Series([False] * len(df), index=df.index)
+
+    as_text = df[date_col].astype("string").str.strip().str.lower()
+    return (
+        df[date_col].notna()
+        & ~as_text.isin(["", "---", "nan", "none", "null", "<na>"])
+    )
+
+
+def filter_rows_with_idela_date(df: pd.DataFrame, date_col: str):
+    """Filter rows where IDELA date exists and return filtered data plus a summary."""
+    mask = idela_date_exists_mask(df, date_col)
+    filtered = df.loc[mask].copy()
+    summary = {
+        "original_rows": int(len(df)),
+        "kept_rows": int(mask.sum()),
+        "removed_rows": int((~mask).sum()),
+        "date_column": date_col,
+    }
+    return filtered, summary
+
+
+def show_idela_date_filter_summary(summary: Dict[str, int]):
+    if not summary:
+        return
+    st.success(
+        f"IDELA date filter applied using `{summary.get('date_column')}`: "
+        f"kept **{summary.get('kept_rows', 0)}** row(s), "
+        f"removed **{summary.get('removed_rows', 0)}** row(s) without IDELA date."
+    )
+
 def build_same_row_df(raw_df: pd.DataFrame, mapping: Dict[str, str]) -> pd.DataFrame:
     # Rename mapped uploaded columns into the standard format, then discard all other columns.
     rename = {uploaded: standard for standard, uploaded in mapping.items() if uploaded}
@@ -1135,7 +1174,7 @@ init_state()
 show_progress()
 st.divider()
 
-# STEP 1: Upload structure and files
+# STEP 1: Upload structure, files, and IDELA date filter
 if st.session_state.step == 1:
     st.subheader("Step 1: Select upload structure")
     upload_type = st.radio(
@@ -1152,18 +1191,36 @@ if st.session_state.step == 1:
         st.session_state.upload_type = upload_type
         reset_after_upload_type_change()
 
+    mapping = dict(st.session_state.column_mapping) if st.session_state.column_mapping else {}
+
     if upload_type.startswith("One file: baseline and endline are in the same row"):
         uploaded_file = st.file_uploader("Upload Excel file", type=["xlsx", "xlsm", "xls"], key="same_file")
         if uploaded_file:
             xl = pd.ExcelFile(uploaded_file)
             sheet_name = st.selectbox("Select raw data sheet", xl.sheet_names, key="same_sheet")
-            raw_df = read_excel_file(uploaded_file, sheet_name)
-            st.session_state.raw_df = raw_df
-            st.session_state.download_raw_df = raw_df.copy()
-            st.success(f"Loaded {len(raw_df)} rows and {len(raw_df.columns)} columns.")
-            st.dataframe(raw_df.head(10), use_container_width=True)
-            if st.button("Next: Map columns", type="primary"):
-                go_next()
+            original_raw_df = read_excel_file(uploaded_file, sheet_name)
+            uploaded_cols = list(original_raw_df.columns)
+
+            st.success(f"Loaded {len(original_raw_df)} rows and {len(original_raw_df.columns)} columns.")
+            st.markdown("#### First select the IDELA date field")
+            selectbox_mapping("IDELA date field", "IDELA_date", uploaded_cols, "IDELA_date", mapping)
+
+            if mapping.get("IDELA_date"):
+                raw_df, summary = filter_rows_with_idela_date(original_raw_df, mapping["IDELA_date"])
+                show_idela_date_filter_summary(summary)
+                st.session_state.raw_df = raw_df
+                st.session_state.download_raw_df = original_raw_df.copy()
+                st.session_state.column_mapping = mapping
+                st.session_state.idela_date_filter_column = mapping["IDELA_date"]
+                st.session_state.idela_date_filter_summary = summary
+                st.dataframe(raw_df.head(10), use_container_width=True)
+                if len(raw_df) == 0:
+                    st.error("No rows have an IDELA date. Please choose the correct IDELA date field.")
+                elif st.button("Next: Map columns", type="primary"):
+                    go_next()
+            else:
+                st.warning("Please select the IDELA date field first. Rows without IDELA date will be excluded before mapping.")
+                st.dataframe(original_raw_df.head(10), use_container_width=True)
 
     elif upload_type.startswith("Two files"):
         col1, col2 = st.columns(2)
@@ -1177,34 +1234,67 @@ if st.session_state.step == 1:
             c1, c2 = st.columns(2)
             with c1:
                 base_sheet = st.selectbox("Baseline sheet", base_xl.sheet_names, key="base_sheet")
-                base_df = read_excel_file(base_file, base_sheet)
+                original_base_df = read_excel_file(base_file, base_sheet)
                 st.write("Baseline preview")
-                st.dataframe(base_df.head(5), use_container_width=True)
+                st.dataframe(original_base_df.head(5), use_container_width=True)
             with c2:
                 end_sheet = st.selectbox("Endline sheet", end_xl.sheet_names, key="end_sheet")
                 end_df = read_excel_file(end_file, end_sheet)
                 st.write("Endline preview")
                 st.dataframe(end_df.head(5), use_container_width=True)
-            st.session_state.base_df = base_df
-            st.session_state.end_df = end_df
-            base_raw = base_df.copy(); base_raw.insert(0, "__source_file__", "baseline")
-            end_raw = end_df.copy(); end_raw.insert(0, "__source_file__", "endline")
-            st.session_state.download_raw_df = pd.concat([base_raw, end_raw], ignore_index=True, sort=False)
-            if st.button("Next: Map columns", type="primary"):
-                go_next()
+
+            st.markdown("#### First select the baseline IDELA date field")
+            base_cols = list(original_base_df.columns)
+            selectbox_mapping("Baseline IDELA date field", "IDELA_date", base_cols, "base_IDELA_date", mapping)
+
+            if mapping.get("base_IDELA_date"):
+                base_df, summary = filter_rows_with_idela_date(original_base_df, mapping["base_IDELA_date"])
+                show_idela_date_filter_summary(summary)
+                st.session_state.base_df = base_df
+                st.session_state.end_df = end_df
+                base_raw = original_base_df.copy(); base_raw.insert(0, "__source_file__", "baseline")
+                end_raw = end_df.copy(); end_raw.insert(0, "__source_file__", "endline")
+                st.session_state.download_raw_df = pd.concat([base_raw, end_raw], ignore_index=True, sort=False)
+                st.session_state.column_mapping = mapping
+                st.session_state.idela_date_filter_column = mapping["base_IDELA_date"]
+                st.session_state.idela_date_filter_summary = summary
+                st.write("Filtered baseline preview")
+                st.dataframe(base_df.head(5), use_container_width=True)
+                if len(base_df) == 0:
+                    st.error("No baseline rows have an IDELA date. Please choose the correct baseline IDELA date field.")
+                elif st.button("Next: Map columns", type="primary"):
+                    go_next()
+            else:
+                st.warning("Please select the baseline IDELA date field first. Baseline rows without IDELA date will be excluded before mapping.")
 
     else:
         uploaded_file = st.file_uploader("Upload Excel file with baseline/endline duplicated rows", type=["xlsx", "xlsm", "xls"], key="dup_file")
         if uploaded_file:
             xl = pd.ExcelFile(uploaded_file)
             sheet_name = st.selectbox("Select raw data sheet", xl.sheet_names, key="dup_sheet")
-            raw_df = read_excel_file(uploaded_file, sheet_name)
-            st.session_state.raw_df = raw_df
-            st.session_state.download_raw_df = raw_df.copy()
-            st.success(f"Loaded {len(raw_df)} rows and {len(raw_df.columns)} columns.")
-            st.dataframe(raw_df.head(10), use_container_width=True)
-            if st.button("Next: Map columns", type="primary"):
-                go_next()
+            original_raw_df = read_excel_file(uploaded_file, sheet_name)
+            uploaded_cols = list(original_raw_df.columns)
+
+            st.success(f"Loaded {len(original_raw_df)} rows and {len(original_raw_df.columns)} columns.")
+            st.markdown("#### First select the IDELA date field")
+            selectbox_mapping("IDELA date field", "IDELA_date", uploaded_cols, "meta_IDELA_date", mapping)
+
+            if mapping.get("meta_IDELA_date"):
+                raw_df, summary = filter_rows_with_idela_date(original_raw_df, mapping["meta_IDELA_date"])
+                show_idela_date_filter_summary(summary)
+                st.session_state.raw_df = raw_df
+                st.session_state.download_raw_df = original_raw_df.copy()
+                st.session_state.column_mapping = mapping
+                st.session_state.idela_date_filter_column = mapping["meta_IDELA_date"]
+                st.session_state.idela_date_filter_summary = summary
+                st.dataframe(raw_df.head(10), use_container_width=True)
+                if len(raw_df) == 0:
+                    st.error("No rows have an IDELA date. Please choose the correct IDELA date field.")
+                elif st.button("Next: Map columns", type="primary"):
+                    go_next()
+            else:
+                st.warning("Please select the IDELA date field first. Rows without IDELA date will be excluded before mapping.")
+                st.dataframe(original_raw_df.head(10), use_container_width=True)
 
 # STEP 2: Mapping
 elif st.session_state.step == 2:
@@ -1216,10 +1306,12 @@ elif st.session_state.step == 2:
         raw_df = st.session_state.raw_df
         uploaded_cols = list(raw_df.columns)
         st.write("Map the uploaded columns into the standard IDELA format.")
+        show_idela_date_filter_summary(st.session_state.get("idela_date_filter_summary", {}))
         tab_meta, tab_q, tab_preview = st.tabs(["Essential info columns", "Required question columns", "Preview"])
         with tab_meta:
             st.warning("Map these essential info columns. Any other uploaded columns will be discarded.")
-            for col in META_COLUMNS:
+            st.info(f"IDELA_date is already mapped to `{mapping.get('IDELA_date', '')}` from Step 1.")
+            for col in [c for c in META_COLUMNS if c != "IDELA_date"]:
                 selectbox_mapping(col, col, uploaded_cols, col, mapping)
         with tab_q:
             st.warning("Map all baseline question columns and all endline/post question columns.")
@@ -1259,13 +1351,14 @@ elif st.session_state.step == 2:
         base_cols = list(base_df.columns)
         end_cols = list(end_df.columns)
         st.write("Map baseline columns from the baseline file, and endline columns from the endline file.")
+        show_idela_date_filter_summary(st.session_state.get("idela_date_filter_summary", {}))
         tab_ids, tab_meta, tab_base, tab_end = st.tabs(["ID columns", "Essential baseline info", "Baseline questions", "Endline questions"])
         with tab_ids:
             selectbox_mapping("Baseline unique child/beneficiary ID", "caseid", base_cols, "base_id", mapping)
             selectbox_mapping("Endline unique child/beneficiary ID", "caseid", end_cols, "end_id", mapping)
         with tab_meta:
             st.warning("Map these essential info columns from the baseline file. Any other uploaded columns will be discarded.")
-            selectbox_mapping("Baseline IDELA_date", "IDELA_date", base_cols, "base_IDELA_date", mapping)
+            st.info(f"Baseline IDELA_date is already mapped to `{mapping.get('base_IDELA_date', '')}` from Step 1.")
             for col in [c for c in META_COLUMNS if c not in ["caseid", "IDELA_date"]]:
                 selectbox_mapping(col, col, base_cols, f"base_{col}", mapping)
         with tab_base:
@@ -1307,6 +1400,7 @@ elif st.session_state.step == 2:
         raw_df = st.session_state.raw_df
         uploaded_cols = list(raw_df.columns)
         st.write("Map the ID column, round column, then select which round value means baseline and endline.")
+        show_idela_date_filter_summary(st.session_state.get("idela_date_filter_summary", {}))
         tab_setup, tab_meta, tab_q, tab_preview = st.tabs(["ID and round", "Essential info columns", "Question columns", "Preview"])
         with tab_setup:
             selectbox_mapping("Unique child/beneficiary ID", "caseid", uploaded_cols, "dup_id", mapping)
@@ -1324,7 +1418,7 @@ elif st.session_state.step == 2:
                 selectbox_mapping(question_mapping_label(base_col), base_col, uploaded_cols, f"q_{base_col}", mapping)
         with tab_meta:
             st.warning("Map these essential info columns. Any other uploaded columns will be discarded.")
-            selectbox_mapping("IDELA_date", "IDELA_date", uploaded_cols, "meta_IDELA_date", mapping)
+            st.info(f"IDELA_date is already mapped to `{mapping.get('meta_IDELA_date', '')}` from Step 1.")
             for col in [c for c in META_COLUMNS if c not in ["caseid", "IDELA_date"]]:
                 selectbox_mapping(col, col, uploaded_cols, f"meta_{col}", mapping)
         with tab_preview:
