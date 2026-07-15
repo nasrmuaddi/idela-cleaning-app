@@ -6,6 +6,12 @@ from typing import Dict, List
 import pandas as pd
 import streamlit as st
 
+try:
+    from streamlit_sortables import sort_items
+    _HAS_SORTABLES = True
+except Exception:
+    _HAS_SORTABLES = False
+
 st.set_page_config(page_title="IDELA Cleaning App", layout="wide")
 st.title("IDELA Cleaning App")
 st.caption("Upload, map columns, review missing values, choose actions, and download a cleaned workbook.")
@@ -245,6 +251,10 @@ def init_state():
         "filtered_df": None,
         "clean_base": None,
         "scored_df": None,
+        "paired_df": None,
+        "pairing_summary": {},
+        "item_mapping": dict(ITEM_MAPPING),
+        "domain_mapping": {k: list(v) for k, v in DOMAIN_MAPPING.items()},
         "value_recode_mapping": {},
         "actions": {},
         "selected_delete_indices": set(),
@@ -576,8 +586,10 @@ def create_by_question(clean_df: pd.DataFrame, baseline_cols: List[str]) -> pd.D
 
 
 
-def create_by_item(clean_df: pd.DataFrame) -> pd.DataFrame:
+def create_by_item(clean_df: pd.DataFrame, item_mapping=None) -> pd.DataFrame:
     """Create item-level baseline/endline/comparison scores per row."""
+    if item_mapping is None:
+        item_mapping = ITEM_MAPPING
     out = clean_df[[c for c in META_COLUMNS if c in clean_df.columns]].copy()
     item_score_cols_base = []
     item_score_cols_end = []
@@ -585,8 +597,8 @@ def create_by_item(clean_df: pd.DataFrame) -> pd.DataFrame:
     ordered_items = [f"ITEM_{i}" for i in range(1, 22)]
     for item_id in ordered_items:
         item_name = ITEM_NAMES.get(item_id, item_id)
-        base_questions = [q for q, item in ITEM_MAPPING.items() if item == item_id and q in clean_df.columns]
-        end_questions = [f"{q}_post" for q, item in ITEM_MAPPING.items() if item == item_id and f"{q}_post" in clean_df.columns]
+        base_questions = [q for q, item in item_mapping.items() if item == item_id and q in clean_df.columns]
+        end_questions = [f"{q}_post" for q, item in item_mapping.items() if item == item_id and f"{q}_post" in clean_df.columns]
 
         base_col_name = f"{item_id} {item_name} baseline"
         end_col_name = f"{item_id} {item_name} endline"
@@ -614,13 +626,15 @@ def create_by_item(clean_df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-def create_by_domain(by_item_df: pd.DataFrame) -> pd.DataFrame:
+def create_by_domain(by_item_df: pd.DataFrame, domain_mapping=None) -> pd.DataFrame:
     """Create domain-level baseline/endline/comparison scores using item scores."""
+    if domain_mapping is None:
+        domain_mapping = DOMAIN_MAPPING
     out = by_item_df[[c for c in META_COLUMNS if c in by_item_df.columns]].copy()
     domain_base_cols = []
     domain_end_cols = []
 
-    for domain_name, items in DOMAIN_MAPPING.items():
+    for domain_name, items in domain_mapping.items():
         item_base_cols = []
         item_end_cols = []
         for item_id in items:
@@ -931,7 +945,7 @@ def go_back():
 
 
 def show_progress():
-    labels = ["1. Upload Structure", "2. Map Columns", "3. Score Text Values", "4. Review Rows", "5. Question Actions", "6. Download"]
+    labels = ["1. Upload", "2. Map Columns", "3. Pair Pre/Post", "4. Score Text", "5. Review Rows", "6. Question Actions", "7. Questions→Items", "8. Items→Domains", "9. Download"]
     current = st.session_state.step
     st.progress((current - 1) / (len(labels) - 1))
     st.write(" → ".join([f"**{x}**" if i + 1 == current else x for i, x in enumerate(labels)]))
@@ -1331,7 +1345,7 @@ elif st.session_state.step == 2:
 
         required_keys = META_COLUMNS + BASELINE_QUESTION_COLS + ENDLINE_QUESTION_COLS
 
-        if st.button("Next: Score text values", type="primary"):
+        if st.button("Next: Pair pre/post", type="primary"):
             missing = [k for k in required_keys if not mapping.get(k)]
             selected = [mapping.get(k, "") for k in required_keys if mapping.get(k)]
             duplicates = sorted({x for x in selected if selected.count(x) > 1})
@@ -1373,7 +1387,7 @@ elif st.session_state.step == 2:
             show_two_file_count_summary(base_df, end_df, mapping.get("base_id"), mapping.get("end_id"))
 
         required_keys = ["base_id", "end_id", "base_IDELA_date"] + [f"base_{c}" for c in META_COLUMNS if c not in ["caseid", "IDELA_date"]] + [f"base_{c}" for c in BASELINE_QUESTION_COLS] + [f"end_{c}" for c in BASELINE_QUESTION_COLS]
-        if st.button("Next: Score text values", type="primary"):
+        if st.button("Next: Pair pre/post", type="primary"):
             missing = [k for k in required_keys if not mapping.get(k)]
             base_selected = [mapping.get(k, "") for k in required_keys if k.startswith("base_") and mapping.get(k)] + ([mapping.get("base_id")] if mapping.get("base_id") else [])
             end_selected = [mapping.get(k, "") for k in required_keys if k.startswith("end_") and mapping.get(k)] + ([mapping.get("end_id")] if mapping.get("end_id") else [])
@@ -1429,7 +1443,7 @@ elif st.session_state.step == 2:
             show_duplicated_rows_count_summary(raw_df, mapping.get("dup_id"), mapping.get("round_col"), baseline_value, endline_value)
 
         required_keys = ["dup_id", "round_col", "meta_IDELA_date"] + [f"meta_{c}" for c in META_COLUMNS if c not in ["caseid", "IDELA_date"]] + [f"q_{c}" for c in BASELINE_QUESTION_COLS]
-        if st.button("Next: Score text values", type="primary"):
+        if st.button("Next: Pair pre/post", type="primary"):
             missing = [k for k in required_keys if not mapping.get(k)]
             selected = [mapping.get(k, "") for k in required_keys if mapping.get(k)]
             duplicates = sorted({x for x in selected if x and selected.count(x) > 1})
@@ -1458,10 +1472,91 @@ elif st.session_state.step == 2:
     if st.button("Back"):
         go_back()
 
-# STEP 3: Score/recode text values
+# STEP 3: Pair pre/post by case ID and drop unpaired children
 elif st.session_state.step == 3:
-    st.subheader("Step 3: Score text values in question fields")
-    mapped_df = st.session_state.mapped_df.copy()
+    st.subheader("Step 3: Pair pre/post and drop unpaired children")
+    st.write("A child is kept only if they have data on BOTH the pre (baseline) side and the post (endline) side.")
+
+    source_df = st.session_state.mapped_df.copy() if st.session_state.mapped_df is not None else None
+    if source_df is None or len(source_df) == 0:
+        st.error("No mapped data found. Go back to Step 2 and map your columns.")
+        st.stop()
+
+    base_cols = [c for c in BASELINE_QUESTION_COLS if c in source_df.columns]
+    end_cols = [c for c in ENDLINE_QUESTION_COLS if c in source_df.columns]
+
+    # Treat blanks / --- / 999 as missing consistently before deciding if a side has data.
+    check_df = normalize_score_values(source_df, base_cols + end_cols)
+
+    def _side_has_data(cols):
+        if not cols:
+            return pd.Series([False] * len(check_df), index=check_df.index)
+        present = pd.concat([~is_missing_question_value(check_df[c]) for c in cols], axis=1)
+        return present.any(axis=1)
+
+    has_pre = _side_has_data(base_cols)
+    has_post = _side_has_data(end_cols)
+    paired_mask = has_pre & has_post
+
+    total = int(len(source_df))
+    kept = int(paired_mask.sum())
+    only_pre = int((has_pre & ~has_post).sum())
+    only_post = int((~has_pre & has_post).sum())
+    neither = int((~has_pre & ~has_post).sum())
+
+    id_col = "caseid" if "caseid" in source_df.columns else None
+    st.info(
+        f"Out of **{total}** child record(s), **{kept}** have BOTH pre and post and will be kept. "
+        f"**{total - kept}** will be dropped."
+    )
+    reason_rows = []
+    if only_pre:
+        reason_rows.append({"Reason": "Has pre only (no post)", "Children": only_pre})
+    if only_post:
+        reason_rows.append({"Reason": "Has post only (no pre)", "Children": only_post})
+    if neither:
+        reason_rows.append({"Reason": "No pre and no post data", "Children": neither})
+    if reason_rows:
+        st.dataframe(pd.DataFrame(reason_rows), hide_index=True, use_container_width=True)
+
+    dropped_df = source_df.loc[~paired_mask].copy()
+    if len(dropped_df) > 0:
+        with st.expander(f"Show {len(dropped_df)} dropped child record(s)"):
+            show_cols = [c for c in [id_col, "d_childs_full_name", "e_childs_sex", "f_childs_age", "teacher_location"] if c and c in dropped_df.columns]
+            disp = dropped_df[show_cols].copy() if show_cols else dropped_df.iloc[:, :4].copy()
+            disp["has pre?"] = has_pre.loc[dropped_df.index].map({True: "yes", False: "no"}).values
+            disp["has post?"] = has_post.loc[dropped_df.index].map({True: "yes", False: "no"}).values
+            st.dataframe(disp, hide_index=True, use_container_width=True)
+
+    paired_df = source_df.loc[paired_mask].copy()
+    st.session_state.paired_df = paired_df
+    st.session_state.pairing_summary = {
+        "total": total, "kept": kept, "only_pre": only_pre,
+        "only_post": only_post, "neither": neither,
+    }
+
+    if kept == 0:
+        st.error("No child has both pre and post. Check your column mapping (case ID and the post/endline question columns).")
+
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button("Back"):
+            go_back()
+    with c2:
+        if kept > 0 and st.button("Next: Score text values", type="primary"):
+            # Re-scoring / re-review must start fresh from the newly paired set.
+            st.session_state.scored_df = None
+            st.session_state.filtered_df = None
+            st.session_state.clean_base = None
+            st.session_state.selected_delete_indices = set()
+            st.session_state.actions = {}
+            go_next()
+
+# STEP 4: Score/recode text values
+elif st.session_state.step == 4:
+    st.subheader("Step 4: Score text values in question fields")
+    mapped_df = (st.session_state.paired_df.copy() if st.session_state.get("paired_df") is not None
+                 else st.session_state.mapped_df.copy())
     all_question_cols = [c for c in BASELINE_QUESTION_COLS + ENDLINE_QUESTION_COLS if c in mapped_df.columns]
 
     # Backend rule: before scoring answers, replace any null/blank value in question columns with ---
@@ -1550,10 +1645,12 @@ elif st.session_state.step == 3:
                     st.session_state.actions_confirmed = False
                     go_next()
 
-# STEP 4: Row review
-elif st.session_state.step == 4:
+# STEP 5: Row review
+elif st.session_state.step == 5:
     st.subheader("Step 4: Review rows with high missing percentage")
-    mapped_df = st.session_state.scored_df.copy() if st.session_state.scored_df is not None else st.session_state.mapped_df.copy()
+    mapped_df = (st.session_state.scored_df.copy() if st.session_state.scored_df is not None
+                 else (st.session_state.paired_df.copy() if st.session_state.get("paired_df") is not None
+                       else st.session_state.mapped_df.copy()))
 
     if "IDELA_date" not in mapped_df.columns:
         st.error("IDELA_date is missing. Go back and map it.")
@@ -1643,8 +1740,8 @@ elif st.session_state.step == 4:
             st.session_state.actions_confirmed = False
             go_next()
 
-# STEP 5: Question actions
-elif st.session_state.step == 5:
+# STEP 6: Question actions
+elif st.session_state.step == 6:
     st.subheader("Step 5: Question Missing Review and Actions")
     clean_base = st.session_state.clean_base.copy()
     st.info(f"Question missing percentages are calculated using **{len(clean_base)} cleaned rows** after Step 4 row deletion.")
@@ -1748,7 +1845,7 @@ elif st.session_state.step == 5:
             else:
                 st.warning(f"The following {len(dropped_questions)} question(s) will be dropped from baseline and endline:")
                 st.dataframe(dropped_questions, hide_index=True, use_container_width=True)
-            if st.button("Confirm and continue to download", type="primary"):
+            if st.button("Confirm and continue", type="primary"):
                 confirm_and_continue()
     else:
         show_drop_confirmation = None
@@ -1770,12 +1867,157 @@ elif st.session_state.step == 5:
             st.success("No questions will be dropped.")
         else:
             st.dataframe(dropped_questions, hide_index=True, use_container_width=True)
-        if st.button("Confirm and continue to download", type="primary"):
+        if st.button("Confirm and continue", type="primary"):
             st.session_state.show_drop_confirmation_inline = False
             confirm_and_continue()
 
-# STEP 6: Download
-elif st.session_state.step == 6:
+# STEP 7: Map questions into items (drag and drop)
+elif st.session_state.step == 7:
+    st.subheader("Step 7: Map questions into items")
+    st.write("Drag each question card into the correct item box. Defaults follow the standard IDELA structure — adjust if needed.")
+
+    ordered_items = [f"ITEM_{i}" for i in range(1, 22)]
+    current_map = dict(st.session_state.item_mapping) if st.session_state.item_mapping else dict(ITEM_MAPPING)
+    all_qids = list(QUESTION_LABELS.keys())
+
+    def _q_card(qid):
+        lab = QUESTION_LABELS.get(qid, qid)
+        eng = lab.split(" | ", 1)[1].strip() if " | " in lab else str(lab)
+        if len(eng) > 42:
+            eng = eng[:42] + "…"
+        return f"{qid} · {eng}"
+
+    def _item_header(item_id):
+        return f"{item_id} · {ITEM_NAMES.get(item_id, item_id)}"
+
+    UNASSIGNED_Q = "⬚ Unassigned questions"
+    card_to_qid, header_to_item = {}, {}
+    containers = []
+    for item_id in ordered_items:
+        header = _item_header(item_id)
+        header_to_item[header] = item_id
+        cards = []
+        for q in [x for x in all_qids if current_map.get(x) == item_id]:
+            c = _q_card(q); card_to_qid[c] = q; cards.append(c)
+        containers.append({"header": header, "items": cards})
+    un_cards = []
+    for q in all_qids:
+        if current_map.get(q) not in ordered_items:
+            c = _q_card(q); card_to_qid[c] = q; un_cards.append(c)
+    containers.append({"header": UNASSIGNED_Q, "items": un_cards})
+
+    use_dropdown = st.checkbox("Use dropdown editor instead of drag & drop", value=not _HAS_SORTABLES, key="itemmap_dropdown")
+
+    new_map = {}
+    if _HAS_SORTABLES and not use_dropdown:
+        result = sort_items(containers, multi_containers=True, direction="vertical")
+        for cont in result:
+            item_id = header_to_item.get(cont["header"])
+            if item_id is None:
+                continue
+            for card in cont["items"]:
+                q = card_to_qid.get(card)
+                if q:
+                    new_map[q] = item_id
+    else:
+        if not _HAS_SORTABLES:
+            st.warning("Drag-and-drop component not installed. Add `streamlit-sortables` to requirements.txt for the drag view. Using dropdown editor for now.")
+        item_choices = [f"{i} · {ITEM_NAMES.get(i, i)}" for i in ordered_items] + ["(unassigned)"]
+        item_label_to_id = {f"{i} · {ITEM_NAMES.get(i, i)}": i for i in ordered_items}
+        for q in all_qids:
+            di = current_map.get(q)
+            dl = f"{di} · {ITEM_NAMES.get(di, di)}" if di in ordered_items else "(unassigned)"
+            idx = item_choices.index(dl) if dl in item_choices else len(item_choices) - 1
+            choice = st.selectbox(_q_card(q), item_choices, index=idx, key=f"itemmap_{q}")
+            if choice in item_label_to_id:
+                new_map[q] = item_label_to_id[choice]
+
+    st.session_state.item_mapping = new_map
+
+    empty_items = [it for it in ordered_items if not any(v == it for v in new_map.values())]
+    if empty_items:
+        st.warning("Items with no questions yet: " + ", ".join(f"{i} ({ITEM_NAMES.get(i, i)})" for i in empty_items))
+
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button("Back"):
+            go_back()
+    with c2:
+        if st.button("Next: Map items into domains", type="primary"):
+            go_next()
+
+# STEP 8: Map items into domains (drag and drop)
+elif st.session_state.step == 8:
+    st.subheader("Step 8: Map items into domains")
+    st.write("Drag each item card into the correct domain box. Defaults follow the standard IDELA domains — adjust if needed.")
+
+    ordered_items = [f"ITEM_{i}" for i in range(1, 22)]
+    current_domains = st.session_state.domain_mapping or {k: list(v) for k, v in DOMAIN_MAPPING.items()}
+    domain_names = list(DOMAIN_MAPPING.keys())
+
+    def _item_card2(item_id):
+        return f"{item_id} · {ITEM_NAMES.get(item_id, item_id)}"
+
+    item_to_domain = {}
+    for dname, items in current_domains.items():
+        for it in items:
+            item_to_domain[it] = dname
+
+    UNASSIGNED_I = "⬚ Unassigned items"
+    card_to_item, header_to_domain = {}, {}
+    containers = []
+    for dname in domain_names:
+        header_to_domain[dname] = dname
+        cards = []
+        for it in [x for x in ordered_items if item_to_domain.get(x) == dname]:
+            c = _item_card2(it); card_to_item[c] = it; cards.append(c)
+        containers.append({"header": dname, "items": cards})
+    un_cards = []
+    for it in ordered_items:
+        if item_to_domain.get(it) not in domain_names:
+            c = _item_card2(it); card_to_item[c] = it; un_cards.append(c)
+    containers.append({"header": UNASSIGNED_I, "items": un_cards})
+
+    use_dropdown = st.checkbox("Use dropdown editor instead of drag & drop", value=not _HAS_SORTABLES, key="domainmap_dropdown")
+
+    new_domains = {d: [] for d in domain_names}
+    if _HAS_SORTABLES and not use_dropdown:
+        result = sort_items(containers, multi_containers=True, direction="vertical")
+        for cont in result:
+            dname = header_to_domain.get(cont["header"])
+            if dname is None:
+                continue
+            for card in cont["items"]:
+                it = card_to_item.get(card)
+                if it:
+                    new_domains[dname].append(it)
+    else:
+        if not _HAS_SORTABLES:
+            st.warning("Drag-and-drop component not installed. Add `streamlit-sortables` to requirements.txt for the drag view. Using dropdown editor for now.")
+        choices = domain_names + ["(unassigned)"]
+        for it in ordered_items:
+            dd = item_to_domain.get(it)
+            idx = choices.index(dd) if dd in domain_names else len(choices) - 1
+            choice = st.selectbox(_item_card2(it), choices, index=idx, key=f"domainmap_{it}")
+            if choice in domain_names:
+                new_domains[choice].append(it)
+
+    st.session_state.domain_mapping = new_domains
+
+    unassigned_items = [it for it in ordered_items if all(it not in v for v in new_domains.values())]
+    if unassigned_items:
+        st.warning("Items not in any domain (excluded from domain scores): " + ", ".join(unassigned_items))
+
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button("Back"):
+            go_back()
+    with c2:
+        if st.button("Next: Preview and download", type="primary"):
+            go_next()
+
+# STEP 9: Download
+elif st.session_state.step == 9:
     st.subheader("Step 6: Preview and Download")
     clean_base = st.session_state.clean_base.copy()
     filtered_df = st.session_state.filtered_df.copy()
@@ -1792,8 +2034,8 @@ elif st.session_state.step == 6:
     cleaned_data_sheet = apply_actions(clean_base, zero_only_actions)
 
     by_question_df = create_by_question(clean_df, BASELINE_QUESTION_COLS)
-    by_item_df = create_by_item(clean_df)
-    by_domain_df = create_by_domain(by_item_df)
+    by_item_df = create_by_item(clean_df, st.session_state.get("item_mapping") or ITEM_MAPPING)
+    by_domain_df = create_by_domain(by_item_df, st.session_state.get("domain_mapping") or DOMAIN_MAPPING)
 
     st.write("Clean data preview")
     st.dataframe(clean_df.head(20), use_container_width=True)
