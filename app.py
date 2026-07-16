@@ -17,7 +17,7 @@ st.title("IDELA Cleaning App")
 st.caption("Upload, map columns, review missing values, choose actions, and download a cleaned workbook.")
 
 META_COLUMNS = [
-    "caseid", "IDELA_date", "idela_child_pwd", "If_yes_due_to_pwd",
+    "caseid", "idela_child_pwd", "If_yes_due_to_pwd",
     "sector", "program", "teacher_location", "d_childs_full_name",
     "e_childs_sex", "f_childs_age", "h_country", "child_status",
     "nationality", "district", "governorate", "sub_district"
@@ -102,6 +102,47 @@ QUESTION_LABELS = {
 
 BASELINE_QUESTION_COLS = list(QUESTION_LABELS.keys())
 ENDLINE_QUESTION_COLS = [f"{c}_post" for c in BASELINE_QUESTION_COLS]
+
+# Questions whose answer is a count/level rather than 0/1. Values are the DEFAULT max score
+# (each question individually). The user can override these in the max-score step.
+# Item 5 = i5_row12 + i5_row34 (10 + 10 = 20 combined); Item 15 likewise.
+COUNT_QUESTION_DEFAULT_MAX = {
+    "i5_row12_correct_count": 10,
+    "i5_row34_correct_count": 10,
+    "i8_friends_count": 10,
+    "i13_market_items_count": 10,
+    "i13_animals_count": 10,
+    "i15_row12_letters_count": 10,
+    "i15_row34_letters_count": 10,
+    "i17_writing_level": 4,
+    "i19_closed_corners": 4,
+    "i21_steps": 10,
+}
+
+# Four eye-restful colors, each with light / medium / dark variants.
+RESTFUL_COLORS = {
+    "slate_blue": {"light": "#EAF1F7", "medium": "#C6D8E8", "dark": "#4E6E8E"},
+    "sage_green": {"light": "#EBF3EC", "medium": "#CBE3D0", "dark": "#5C8768"},
+    "warm_sand":  {"light": "#FAF3E7", "medium": "#EEDFC2", "dark": "#B08E52"},
+    "soft_mauve": {"light": "#F2ECF4", "medium": "#DFD1E6", "dark": "#846A99"},
+}
+RESTFUL_ORDER = ["slate_blue", "sage_green", "warm_sand", "soft_mauve"]
+
+SORTABLE_CSS = """
+.sortable-component { gap: 10px; }
+.sortable-container { border-radius: 8px; border: 1px solid #d9d9d9; margin-bottom: 6px; }
+.sortable-container-header { font-weight: 600; padding: 6px 10px; border-radius: 8px 8px 0 0; }
+.sortable-container-body { padding: 6px; min-height: 40px; border-radius: 0 0 8px 8px; }
+.sortable-item { background: #ffffff; border: 1px solid #cfcfcf; border-radius: 6px; padding: 4px 8px; }
+.sortable-container:nth-child(4n+1) .sortable-container-header { background: #C6D8E8; }
+.sortable-container:nth-child(4n+2) .sortable-container-header { background: #CBE3D0; }
+.sortable-container:nth-child(4n+3) .sortable-container-header { background: #EEDFC2; }
+.sortable-container:nth-child(4n+4) .sortable-container-header { background: #DFD1E6; }
+.sortable-container:nth-child(4n+1) .sortable-container-body { background: #EAF1F7; }
+.sortable-container:nth-child(4n+2) .sortable-container-body { background: #EBF3EC; }
+.sortable-container:nth-child(4n+3) .sortable-container-body { background: #FAF3E7; }
+.sortable-container:nth-child(4n+4) .sortable-container-body { background: #F2ECF4; }
+"""
 
 ITEM_MAPPING = {
     "i1a_name_mark": "ITEM_1",
@@ -256,6 +297,7 @@ def init_state():
         "item_mapping": dict(ITEM_MAPPING),
         "domain_mapping": {k: list(v) for k, v in DOMAIN_MAPPING.items()},
         "qa_ready": False,
+        "max_scores": {},
         "value_recode_mapping": {},
         "actions": {},
         "selected_delete_indices": set(),
@@ -728,6 +770,164 @@ def create_status_dashboard(df: pd.DataFrame, analysis_columns: Dict[str, str], 
     return pd.DataFrame(rows)
 
 
+def question_max_score(qid, max_scores=None):
+    """Max achievable for a question: user/known value for count questions, else 1 (a 0/1 item)."""
+    if max_scores and qid in max_scores:
+        try:
+            return float(max_scores[qid])
+        except Exception:
+            pass
+    if qid in COUNT_QUESTION_DEFAULT_MAX:
+        return float(COUNT_QUESTION_DEFAULT_MAX[qid])
+    return 1.0
+
+
+def detect_count_questions(df, question_cols):
+    """Return {qid: observed_max} for baseline question columns whose values exceed 1."""
+    found = {}
+    for q in question_cols:
+        if q not in df.columns:
+            continue
+        vals = pd.to_numeric(df[q], errors="coerce")
+        vals = vals[vals.notna() & (vals != 999)]
+        if len(vals) and float(vals.max()) > 1:
+            found[q] = int(vals.max())
+    return found
+
+
+def analysis_by_question(clean_df, max_scores=None):
+    """Per-question: mean pre/post score and pre/post % (= score / max), plus the change."""
+    rows = []
+    for base_col in BASELINE_QUESTION_COLS:
+        post_col = f"{base_col}_post"
+        if base_col not in clean_df.columns or post_col not in clean_df.columns:
+            continue
+        mx = question_max_score(base_col, max_scores)
+        pre = pd.to_numeric(clean_df[base_col], errors="coerce")
+        post = pd.to_numeric(clean_df[post_col], errors="coerce")
+        pre_score = float(pre.mean()) if len(pre) else 0.0
+        post_score = float(post.mean()) if len(post) else 0.0
+        pre_pct = (pre_score / mx * 100) if mx else 0.0
+        post_pct = (post_score / mx * 100) if mx else 0.0
+        rows.append({
+            "Question": question_excel_name(base_col, "both"),
+            "Question ID": base_col,
+            "Max score": mx,
+            "Pre score": round(pre_score, 3),
+            "Post score": round(post_score, 3),
+            "Pre %": round(pre_pct, 1),
+            "Post %": round(post_pct, 1),
+            "Post - Pre %": round(post_pct - pre_pct, 1),
+        })
+    return pd.DataFrame(rows)
+
+
+def analysis_by_item(clean_df, item_mapping=None, max_scores=None):
+    """Per-item: item score = mean over children of (sum of its question values);
+    item max = sum of its question maxima; item % = score / max."""
+    if item_mapping is None:
+        item_mapping = ITEM_MAPPING
+    ordered = [f"ITEM_{i}" for i in range(1, 22)]
+    rows = []
+    for item_id in ordered:
+        qs = [q for q, it in item_mapping.items()
+              if it == item_id and q in clean_df.columns and f"{q}_post" in clean_df.columns]
+        if not qs:
+            continue
+        item_max = sum(question_max_score(q, max_scores) for q in qs)
+        pre_sum = pd.Series(0.0, index=clean_df.index)
+        post_sum = pd.Series(0.0, index=clean_df.index)
+        for q in qs:
+            pre_sum = pre_sum + pd.to_numeric(clean_df[q], errors="coerce").fillna(0)
+            post_sum = post_sum + pd.to_numeric(clean_df[f"{q}_post"], errors="coerce").fillna(0)
+        pre_score = float(pre_sum.mean()) if len(pre_sum) else 0.0
+        post_score = float(post_sum.mean()) if len(post_sum) else 0.0
+        pre_pct = (pre_score / item_max * 100) if item_max else 0.0
+        post_pct = (post_score / item_max * 100) if item_max else 0.0
+        rows.append({
+            "Item": f"{item_id} - {ITEM_NAMES.get(item_id, item_id)}",
+            "Item ID": item_id,
+            "Questions": len(qs),
+            "Max score": item_max,
+            "Pre score": round(pre_score, 3),
+            "Post score": round(post_score, 3),
+            "Pre %": round(pre_pct, 1),
+            "Post %": round(post_pct, 1),
+            "Post - Pre %": round(post_pct - pre_pct, 1),
+        })
+    return pd.DataFrame(rows)
+
+
+def analysis_by_domain(question_analysis_df, item_mapping=None, domain_mapping=None):
+    """Per-domain: average of the pre/post % of the questions that belong to the domain.
+    IDELA score = average of the four domain %s."""
+    if item_mapping is None:
+        item_mapping = ITEM_MAPPING
+    if domain_mapping is None:
+        domain_mapping = DOMAIN_MAPPING
+    item_to_domain = {}
+    for d, items in domain_mapping.items():
+        for it in items:
+            item_to_domain[it] = d
+    q_to_domain = {}
+    for q, it in item_mapping.items():
+        d = item_to_domain.get(it)
+        if d:
+            q_to_domain[q] = d
+    qa = question_analysis_df.set_index("Question ID") if len(question_analysis_df) else question_analysis_df
+    rows = []
+    pre_vals, post_vals = [], []
+    for d in domain_mapping.keys():
+        qids = [q for q, dd in q_to_domain.items() if dd == d and len(qa) and q in qa.index]
+        if qids:
+            pre_pct = float(qa.loc[qids, "Pre %"].mean())
+            post_pct = float(qa.loc[qids, "Post %"].mean())
+        else:
+            pre_pct = post_pct = 0.0
+        pre_vals.append(pre_pct)
+        post_vals.append(post_pct)
+        rows.append({
+            "Domain": d,
+            "Questions": len(qids),
+            "Pre %": round(pre_pct, 1),
+            "Post %": round(post_pct, 1),
+            "Post - Pre %": round(post_pct - pre_pct, 1),
+        })
+    idela_pre = sum(pre_vals) / len(pre_vals) if pre_vals else 0.0
+    idela_post = sum(post_vals) / len(post_vals) if post_vals else 0.0
+    rows.append({
+        "Domain": "IDELA SCORE (average of domains)",
+        "Questions": "",
+        "Pre %": round(idela_pre, 1),
+        "Post %": round(idela_post, 1),
+        "Post - Pre %": round(idela_post - idela_pre, 1),
+    })
+    return pd.DataFrame(rows)
+
+
+def build_cleaned_data_sheet(clean_df, max_scores=None):
+    """Essential info + question values (pre/post) + a per-child IDELA % score."""
+    meta = [c for c in META_COLUMNS if c in clean_df.columns and c != "IDELA_date"]
+    out = clean_df[meta].copy()
+    q_used = [q for q in BASELINE_QUESTION_COLS
+              if q in clean_df.columns and f"{q}_post" in clean_df.columns]
+    total_max = sum(question_max_score(q, max_scores) for q in q_used)
+    pre_ach = pd.Series(0.0, index=clean_df.index)
+    post_ach = pd.Series(0.0, index=clean_df.index)
+    for q in q_used:
+        pre = pd.to_numeric(clean_df[q], errors="coerce").fillna(0)
+        post = pd.to_numeric(clean_df[f"{q}_post"], errors="coerce").fillna(0)
+        pre_ach = pre_ach + pre
+        post_ach = post_ach + post
+        name = question_excel_name(q, "english")
+        out[f"{name} (pre)"] = pre
+        out[f"{name} (post)"] = post
+    out["IDELA pre %"] = (pre_ach / total_max * 100).round(1) if total_max else 0.0
+    out["IDELA post %"] = (post_ach / total_max * 100).round(1) if total_max else 0.0
+    out["IDELA change %"] = (out["IDELA post %"] - out["IDELA pre %"]).round(1)
+    return out
+
+
 def create_question_dashboard(by_question_df: pd.DataFrame) -> pd.DataFrame:
     question_status_cols = {}
     suffix = " - comparison status"
@@ -917,6 +1117,88 @@ def write_filterable_dashboard(writer, workbook, sheet_name: str, source_df: pd.
     ws.set_column("M:U", 14)
 
 
+def write_new_workbook(raw_df, cleaned_df, q_df, i_df, d_df) -> bytes:
+    """Raw / Cleaned / Question / Item / Domain sheets. Question & Item sheets use two
+    restful alternating row colors; Domain sheet colors each domain and highlights IDELA."""
+    out = io.BytesIO()
+    with pd.ExcelWriter(out, engine="xlsxwriter") as writer:
+        wb = writer.book
+        header_fmt = wb.add_format({"bold": True, "bg_color": "#2F3B52", "font_color": "#FFFFFF",
+                                    "border": 1, "align": "center", "valign": "vcenter", "text_wrap": True})
+        cache = {}
+
+        def cell_fmt(bg, kind, bold=False):
+            key = (bg, kind, bold)
+            if key not in cache:
+                d = {"border": 1, "valign": "vcenter"}
+                if bg:
+                    d["bg_color"] = bg
+                if bold:
+                    d["bold"] = True
+                if kind == "pct":
+                    d["num_format"] = '0.0"%"'
+                elif kind == "num":
+                    d["num_format"] = "0.###"
+                cache[key] = wb.add_format(d)
+            return cache[key]
+
+        def kind_of(col):
+            if "%" in str(col):
+                return "pct"
+            if col in ("Pre score", "Post score", "Max score", "IDELA pre %", "IDELA post %", "IDELA change %"):
+                return "num" if "%" not in str(col) else "pct"
+            return "text"
+
+        def dump_plain(name, df):
+            df = df.copy()
+            df.to_excel(writer, sheet_name=name[:31], index=False)
+            ws = writer.sheets[name[:31]]
+            for j, c in enumerate(df.columns):
+                ws.write(0, j, c, header_fmt)
+            ws.freeze_panes(1, 0)
+
+        def dump_colored(name, df, row_styles, first_col_width=42):
+            ws = wb.add_worksheet(name[:31])
+            writer.sheets[name[:31]] = ws
+            cols = list(df.columns)
+            for j, c in enumerate(cols):
+                ws.write(0, j, c, header_fmt)
+            for i in range(len(df)):
+                bg, bold = row_styles[i] if row_styles else (None, False)
+                for j, c in enumerate(cols):
+                    v = df.iloc[i][c]
+                    k = kind_of(c)
+                    if k in ("pct", "num"):
+                        try:
+                            val = float(v)
+                        except Exception:
+                            val = 0.0
+                    else:
+                        val = "" if pd.isna(v) else str(v)
+                    ws.write(i + 1, j, val, cell_fmt(bg, k, bold))
+            ws.set_column(0, 0, first_col_width)
+            if len(cols) > 1:
+                ws.set_column(1, len(cols) - 1, 13)
+            ws.freeze_panes(1, 0)
+
+        dump_plain("raw data", raw_df)
+        dump_plain("Cleaned data", cleaned_df)
+
+        zebra = [RESTFUL_COLORS["slate_blue"]["light"], RESTFUL_COLORS["sage_green"]["light"]]
+        dump_colored("Question Analysis", q_df, [(zebra[i % 2], False) for i in range(len(q_df))])
+        dump_colored("Item Analysis", i_df, [(zebra[i % 2], False) for i in range(len(i_df))])
+
+        med = [RESTFUL_COLORS[n]["medium"] for n in RESTFUL_ORDER]
+        dstyles, di = [], 0
+        for _, r in d_df.iterrows():
+            if str(r["Domain"]).startswith("IDELA"):
+                dstyles.append((RESTFUL_COLORS["warm_sand"]["medium"], True))
+            else:
+                dstyles.append((med[di % 4], False)); di += 1
+        dump_colored("Domain Analysis", d_df, dstyles, first_col_width=36)
+    return out.getvalue()
+
+
 def to_excel_bytes(sheets: Dict[str, pd.DataFrame]) -> bytes:
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
@@ -946,7 +1228,7 @@ def go_back():
 
 
 def show_progress():
-    labels = ["1. Upload", "2. Map Columns", "3. Pair Pre/Post", "4. Questions→Items", "5. Items→Domains", "6. Review Rows", "7. Score Text", "8. Question Actions", "9. Download"]
+    labels = ["1. Upload", "2. Map Columns", "3. Pair Pre/Post", "4. Score Text", "5. Questions→Items", "6. Max Scores", "7. Items→Domains", "8. Review Rows", "9. Question Actions", "10. Download"]
     current = st.session_state.step
     st.progress((current - 1) / (len(labels) - 1))
     st.write(" → ".join([f"**{x}**" if i + 1 == current else x for i, x in enumerate(labels)]))
@@ -1217,25 +1499,12 @@ if st.session_state.step == 1:
             uploaded_cols = list(original_raw_df.columns)
 
             st.success(f"Loaded {len(original_raw_df)} rows and {len(original_raw_df.columns)} columns.")
-            st.markdown("#### First select the IDELA date field")
-            selectbox_mapping("IDELA date field", "IDELA_date", uploaded_cols, "IDELA_date", mapping)
-
-            if mapping.get("IDELA_date"):
-                raw_df, summary = filter_rows_with_idela_date(original_raw_df, mapping["IDELA_date"])
-                show_idela_date_filter_summary(summary)
-                st.session_state.raw_df = raw_df
-                st.session_state.download_raw_df = original_raw_df.copy()
-                st.session_state.column_mapping = mapping
-                st.session_state.idela_date_filter_column = mapping["IDELA_date"]
-                st.session_state.idela_date_filter_summary = summary
-                st.dataframe(raw_df.head(10), use_container_width=True)
-                if len(raw_df) == 0:
-                    st.error("No rows have an IDELA date. Please choose the correct IDELA date field.")
-                elif st.button("Next: Map columns", type="primary"):
-                    go_next()
-            else:
-                st.warning("Please select the IDELA date field first. Rows without IDELA date will be excluded before mapping.")
-                st.dataframe(original_raw_df.head(10), use_container_width=True)
+            st.session_state.raw_df = original_raw_df.copy()
+            st.session_state.download_raw_df = original_raw_df.copy()
+            st.session_state.column_mapping = mapping
+            st.dataframe(original_raw_df.head(10), use_container_width=True)
+            if st.button("Next: Map columns", type="primary"):
+                go_next()
 
     elif upload_type.startswith("Two files"):
         col1, col2 = st.columns(2)
@@ -1258,29 +1527,14 @@ if st.session_state.step == 1:
                 st.write("Endline preview")
                 st.dataframe(end_df.head(5), use_container_width=True)
 
-            st.markdown("#### First select the baseline IDELA date field")
-            base_cols = list(original_base_df.columns)
-            selectbox_mapping("Baseline IDELA date field", "IDELA_date", base_cols, "base_IDELA_date", mapping)
-
-            if mapping.get("base_IDELA_date"):
-                base_df, summary = filter_rows_with_idela_date(original_base_df, mapping["base_IDELA_date"])
-                show_idela_date_filter_summary(summary)
-                st.session_state.base_df = base_df
-                st.session_state.end_df = end_df
-                base_raw = original_base_df.copy(); base_raw.insert(0, "__source_file__", "baseline")
-                end_raw = end_df.copy(); end_raw.insert(0, "__source_file__", "endline")
-                st.session_state.download_raw_df = pd.concat([base_raw, end_raw], ignore_index=True, sort=False)
-                st.session_state.column_mapping = mapping
-                st.session_state.idela_date_filter_column = mapping["base_IDELA_date"]
-                st.session_state.idela_date_filter_summary = summary
-                st.write("Filtered baseline preview")
-                st.dataframe(base_df.head(5), use_container_width=True)
-                if len(base_df) == 0:
-                    st.error("No baseline rows have an IDELA date. Please choose the correct baseline IDELA date field.")
-                elif st.button("Next: Map columns", type="primary"):
-                    go_next()
-            else:
-                st.warning("Please select the baseline IDELA date field first. Baseline rows without IDELA date will be excluded before mapping.")
+            st.session_state.base_df = original_base_df.copy()
+            st.session_state.end_df = end_df
+            base_raw = original_base_df.copy(); base_raw.insert(0, "__source_file__", "baseline")
+            end_raw = end_df.copy(); end_raw.insert(0, "__source_file__", "endline")
+            st.session_state.download_raw_df = pd.concat([base_raw, end_raw], ignore_index=True, sort=False)
+            st.session_state.column_mapping = mapping
+            if st.button("Next: Map columns", type="primary"):
+                go_next()
 
     else:
         uploaded_file = st.file_uploader("Upload Excel file with baseline/endline duplicated rows", type=["xlsx", "xlsm", "xls"], key="dup_file")
@@ -1291,25 +1545,12 @@ if st.session_state.step == 1:
             uploaded_cols = list(original_raw_df.columns)
 
             st.success(f"Loaded {len(original_raw_df)} rows and {len(original_raw_df.columns)} columns.")
-            st.markdown("#### First select the IDELA date field")
-            selectbox_mapping("IDELA date field", "IDELA_date", uploaded_cols, "meta_IDELA_date", mapping)
-
-            if mapping.get("meta_IDELA_date"):
-                raw_df, summary = filter_rows_with_idela_date(original_raw_df, mapping["meta_IDELA_date"])
-                show_idela_date_filter_summary(summary)
-                st.session_state.raw_df = raw_df
-                st.session_state.download_raw_df = original_raw_df.copy()
-                st.session_state.column_mapping = mapping
-                st.session_state.idela_date_filter_column = mapping["meta_IDELA_date"]
-                st.session_state.idela_date_filter_summary = summary
-                st.dataframe(raw_df.head(10), use_container_width=True)
-                if len(raw_df) == 0:
-                    st.error("No rows have an IDELA date. Please choose the correct IDELA date field.")
-                elif st.button("Next: Map columns", type="primary"):
-                    go_next()
-            else:
-                st.warning("Please select the IDELA date field first. Rows without IDELA date will be excluded before mapping.")
-                st.dataframe(original_raw_df.head(10), use_container_width=True)
+            st.session_state.raw_df = original_raw_df.copy()
+            st.session_state.download_raw_df = original_raw_df.copy()
+            st.session_state.column_mapping = mapping
+            st.dataframe(original_raw_df.head(10), use_container_width=True)
+            if st.button("Next: Map columns", type="primary"):
+                go_next()
 
 # STEP 2: Mapping
 elif st.session_state.step == 2:
@@ -1321,11 +1562,9 @@ elif st.session_state.step == 2:
         raw_df = st.session_state.raw_df
         uploaded_cols = list(raw_df.columns)
         st.write("Map the uploaded columns into the standard IDELA format.")
-        show_idela_date_filter_summary(st.session_state.get("idela_date_filter_summary", {}))
         tab_meta, tab_q = st.tabs(["Essential info columns", "Required question columns"])
         with tab_meta:
             st.warning("Map these essential info columns. Any other uploaded columns will be discarded.")
-            st.info(f"IDELA_date is already mapped to `{mapping.get('IDELA_date', '')}` from Step 1.")
             for col in [c for c in META_COLUMNS if c != "IDELA_date"]:
                 selectbox_mapping(col, col, uploaded_cols, col, mapping)
         with tab_q:
@@ -1360,14 +1599,12 @@ elif st.session_state.step == 2:
         base_cols = list(base_df.columns)
         end_cols = list(end_df.columns)
         st.write("Map baseline columns from the baseline file, and endline columns from the endline file.")
-        show_idela_date_filter_summary(st.session_state.get("idela_date_filter_summary", {}))
         tab_ids, tab_meta, tab_base, tab_end = st.tabs(["ID columns", "Essential baseline info", "Baseline questions", "Endline questions"])
         with tab_ids:
             selectbox_mapping("Baseline unique child/beneficiary ID", "caseid", base_cols, "base_id", mapping)
             selectbox_mapping("Endline unique child/beneficiary ID", "caseid", end_cols, "end_id", mapping)
         with tab_meta:
             st.warning("Map these essential info columns from the baseline file. Any other uploaded columns will be discarded.")
-            st.info(f"Baseline IDELA_date is already mapped to `{mapping.get('base_IDELA_date', '')}` from Step 1.")
             for col in [c for c in META_COLUMNS if c not in ["caseid", "IDELA_date"]]:
                 selectbox_mapping(col, col, base_cols, f"base_{col}", mapping)
         with tab_base:
@@ -1377,7 +1614,7 @@ elif st.session_state.step == 2:
             for base_col in BASELINE_QUESTION_COLS:
                 selectbox_mapping(question_mapping_label(f"{base_col}_post"), base_col, end_cols, f"end_{base_col}", mapping, endline_hint=True)
 
-        required_keys = ["base_id", "end_id", "base_IDELA_date"] + [f"base_{c}" for c in META_COLUMNS if c not in ["caseid", "IDELA_date"]] + [f"base_{c}" for c in BASELINE_QUESTION_COLS] + [f"end_{c}" for c in BASELINE_QUESTION_COLS]
+        required_keys = ["base_id", "end_id"] + [f"base_{c}" for c in META_COLUMNS if c not in ["caseid", "IDELA_date"]] + [f"base_{c}" for c in BASELINE_QUESTION_COLS] + [f"end_{c}" for c in BASELINE_QUESTION_COLS]
         if st.button("Next: Pair pre/post", type="primary"):
             missing = [k for k in required_keys if not mapping.get(k)]
             base_selected = [mapping.get(k, "") for k in required_keys if k.startswith("base_") and mapping.get(k)] + ([mapping.get("base_id")] if mapping.get("base_id") else [])
@@ -1405,7 +1642,6 @@ elif st.session_state.step == 2:
         raw_df = st.session_state.raw_df
         uploaded_cols = list(raw_df.columns)
         st.write("Map the ID column, round column, then select which round value means baseline and endline.")
-        show_idela_date_filter_summary(st.session_state.get("idela_date_filter_summary", {}))
         tab_setup, tab_meta, tab_q = st.tabs(["ID and round", "Essential info columns", "Question columns"])
         with tab_setup:
             selectbox_mapping("Unique child/beneficiary ID", "caseid", uploaded_cols, "dup_id", mapping)
@@ -1423,11 +1659,10 @@ elif st.session_state.step == 2:
                 selectbox_mapping(question_mapping_label(base_col), base_col, uploaded_cols, f"q_{base_col}", mapping)
         with tab_meta:
             st.warning("Map these essential info columns. Any other uploaded columns will be discarded.")
-            st.info(f"IDELA_date is already mapped to `{mapping.get('meta_IDELA_date', '')}` from Step 1.")
             for col in [c for c in META_COLUMNS if c not in ["caseid", "IDELA_date"]]:
                 selectbox_mapping(col, col, uploaded_cols, f"meta_{col}", mapping)
 
-        required_keys = ["dup_id", "round_col", "meta_IDELA_date"] + [f"meta_{c}" for c in META_COLUMNS if c not in ["caseid", "IDELA_date"]] + [f"q_{c}" for c in BASELINE_QUESTION_COLS]
+        required_keys = ["dup_id", "round_col"] + [f"meta_{c}" for c in META_COLUMNS if c not in ["caseid", "IDELA_date"]] + [f"q_{c}" for c in BASELINE_QUESTION_COLS]
         if st.button("Next: Pair pre/post", type="primary"):
             missing = [k for k in required_keys if not mapping.get(k)]
             selected = [mapping.get(k, "") for k in required_keys if mapping.get(k)]
@@ -1528,7 +1763,7 @@ elif st.session_state.step == 3:
         if st.button("Back"):
             go_back()
     with c2:
-        if kept > 0 and st.button("Next: Map questions into items", type="primary"):
+        if kept > 0 and st.button("Next: Score text values", type="primary"):
             # Re-scoring / re-review must start fresh from the newly paired set.
             st.session_state.scored_df = None
             st.session_state.filtered_df = None
@@ -1537,17 +1772,15 @@ elif st.session_state.step == 3:
             st.session_state.actions = {}
             go_next()
 
-# STEP 7: Score/recode text values
-elif st.session_state.step == 7:
-    st.subheader("Step 7: Score text values in question fields")
-    base_df = (st.session_state.clean_base.copy() if st.session_state.get("clean_base") is not None
-               else (st.session_state.paired_df.copy() if st.session_state.get("paired_df") is not None
-                     else st.session_state.mapped_df.copy()))
+# STEP 4: Score/recode text values
+elif st.session_state.step == 4:
+    st.subheader("Step 4: Score text values in question fields")
+    base_df = (st.session_state.paired_df.copy() if st.session_state.get("paired_df") is not None
+               else st.session_state.mapped_df.copy())
     all_question_cols = [c for c in BASELINE_QUESTION_COLS + ENDLINE_QUESTION_COLS if c in base_df.columns]
 
     # Before scoring answers, replace any null/blank value in question columns with ---
     base_df = replace_question_nulls_with_dash(base_df, all_question_cols)
-    st.session_state.clean_base = base_df.copy()
 
     unscored_df = detect_unscored_values(base_df, all_question_cols)
 
@@ -1555,7 +1788,6 @@ elif st.session_state.step == 7:
         # Convert scored values to numbers so downstream missing/action logic is consistent.
         final = normalize_score_values(df_scored, all_question_cols)
         st.session_state.scored_df = final
-        st.session_state.clean_base = final
         st.session_state.actions = {}
         st.session_state.actions_confirmed = False
         st.session_state.qa_ready = False
@@ -1567,7 +1799,7 @@ elif st.session_state.step == 7:
             if st.button("Back"):
                 go_back()
         with c2:
-            if st.button("Next: Question actions", type="primary"):
+            if st.button("Next: Map questions into items", type="primary"):
                 _finalize_scoring(base_df)
                 go_next()
     else:
@@ -1630,27 +1862,21 @@ elif st.session_state.step == 7:
                     _finalize_scoring(scored_df)
                     go_next()
 
-# STEP 6: Row review
-elif st.session_state.step == 6:
-    st.subheader("Step 6: Review rows with high missing percentage")
-    mapped_df = (st.session_state.paired_df.copy() if st.session_state.get("paired_df") is not None
-                 else st.session_state.mapped_df.copy())
+# STEP 8: Row review
+elif st.session_state.step == 8:
+    st.subheader("Step 8: Review rows with high missing percentage")
+    mapped_df = (st.session_state.scored_df.copy() if st.session_state.get("scored_df") is not None
+                 else (st.session_state.paired_df.copy() if st.session_state.get("paired_df") is not None
+                       else st.session_state.mapped_df.copy()))
 
-    if "IDELA_date" not in mapped_df.columns:
-        st.error("IDELA_date is missing. Go back and map it.")
-        st.stop()
-
-    mapped_df["IDELA_date_parsed"] = pd.to_datetime(mapped_df["IDELA_date"], errors="coerce")
-    # Keep the original answer values (text intact) so Step 7 scoring still works.
-    filtered_df = mapped_df[mapped_df["IDELA_date_parsed"].notna()].drop(columns=["IDELA_date_parsed"]).copy()
+    filtered_df = mapped_df.copy()
 
     filtered_df.insert(0, "Delete Action", "")
     filtered_df.insert(1, "baseline missing %", missing_pct(filtered_df, BASELINE_QUESTION_COLS))
     filtered_df.insert(2, "endline missing %", missing_pct(filtered_df, ENDLINE_QUESTION_COLS))
     st.session_state.filtered_df = filtered_df
 
-    st.caption("Note: text answers are scored in the next step, so a value like 'no_response' is not yet counted as missing here.")
-    st.write(f"Rows after pairing and IDELA_date validation: **{len(filtered_df)}**")
+    st.write(f"Rows after pairing: **{len(filtered_df)}**")
     high_missing = filtered_df[(filtered_df["baseline missing %"] > 0.30) | (filtered_df["endline missing %"] > 0.30)].copy()
     st.warning(f"Rows with baseline or endline missing above 30%: {len(high_missing)}")
 
@@ -1717,16 +1943,15 @@ elif st.session_state.step == 6:
         if st.button("Back"):
             go_back()
     with c2:
-        if st.button("Next: Score text values", type="primary"):
-            st.session_state.scored_df = None
+        if st.button("Next: Question actions", type="primary"):
             st.session_state.actions = {}
             st.session_state.actions_confirmed = False
             st.session_state.qa_ready = False
             go_next()
 
-# STEP 8: Question actions
-elif st.session_state.step == 8:
-    st.subheader("Step 8: Question Missing Review and Actions")
+# STEP 9: Question actions
+elif st.session_state.step == 9:
+    st.subheader("Step 9: Question Missing Review and Actions")
     clean_base = st.session_state.clean_base.copy()
     st.info(f"Question missing percentages are calculated using **{len(clean_base)} cleaned rows**.")
 
@@ -1827,9 +2052,9 @@ elif st.session_state.step == 8:
     if st.button("Back"):
         go_back()
 
-# STEP 4: Map questions into items (drag and drop)
-elif st.session_state.step == 4:
-    st.subheader("Step 4: Map questions into items")
+# STEP 5: Map questions into items (drag and drop)
+elif st.session_state.step == 5:
+    st.subheader("Step 5: Map questions into items")
     st.write("Drag each question card into the correct item box. Defaults follow the standard IDELA structure — adjust if needed.")
 
     ordered_items = [f"ITEM_{i}" for i in range(1, 22)]
@@ -1866,7 +2091,7 @@ elif st.session_state.step == 4:
 
     new_map = {}
     if _HAS_SORTABLES and not use_dropdown:
-        result = sort_items(containers, multi_containers=True, direction="vertical")
+        result = sort_items(containers, multi_containers=True, direction="vertical", custom_style=SORTABLE_CSS)
         for cont in result:
             item_id = header_to_item.get(cont["header"])
             if item_id is None:
@@ -1899,12 +2124,12 @@ elif st.session_state.step == 4:
         if st.button("Back"):
             go_back()
     with c2:
-        if st.button("Next: Map items into domains", type="primary"):
+        if st.button("Next: Set count-question max scores", type="primary"):
             go_next()
 
-# STEP 5: Map items into domains (drag and drop)
-elif st.session_state.step == 5:
-    st.subheader("Step 5: Map items into domains")
+# STEP 7: Map items into domains (drag and drop)
+elif st.session_state.step == 7:
+    st.subheader("Step 7: Map items into domains")
     st.write("Drag each item card into the correct domain box. Defaults follow the standard IDELA domains — adjust if needed.")
 
     ordered_items = [f"ITEM_{i}" for i in range(1, 22)]
@@ -1938,7 +2163,7 @@ elif st.session_state.step == 5:
 
     new_domains = {d: [] for d in domain_names}
     if _HAS_SORTABLES and not use_dropdown:
-        result = sort_items(containers, multi_containers=True, direction="vertical")
+        result = sort_items(containers, multi_containers=True, direction="vertical", custom_style=SORTABLE_CSS)
         for cont in result:
             dname = header_to_domain.get(cont["header"])
             if dname is None:
@@ -1972,63 +2197,97 @@ elif st.session_state.step == 5:
         if st.button("Next: Review rows", type="primary"):
             go_next()
 
-# STEP 9: Download
-elif st.session_state.step == 9:
-    st.subheader("Step 9: Preview and Download")
+# STEP 6: Set maximum score for count/number questions
+elif st.session_state.step == 6:
+    st.subheader("Step 6: Maximum score for count / number questions")
+    scored = st.session_state.get("scored_df")
+    if scored is None:
+        st.error("No scored data yet. Go back to Step 4 (Score text values).")
+        st.stop()
+    st.write("Some questions are counts or levels rather than simply 0/1. Set the maximum possible score for each. "
+             "The analysis uses current score ÷ max score for these questions.")
+
+    base_qs = [q for q in BASELINE_QUESTION_COLS if q in scored.columns]
+    detected = detect_count_questions(scored, base_qs)
+    count_qs = [q for q in base_qs if q in COUNT_QUESTION_DEFAULT_MAX or q in detected]
+
+    if not count_qs:
+        st.info("No count/number questions detected — every question looks like 0/1.")
+        st.session_state.max_scores = {}
+    else:
+        current = dict(st.session_state.max_scores or {})
+        new_max = {}
+        for q in count_qs:
+            default = current.get(q, COUNT_QUESTION_DEFAULT_MAX.get(q, detected.get(q, 10)))
+            new_max[q] = st.number_input(
+                f"{q} — {question_excel_name(q, 'both')}",
+                min_value=1.0, value=float(default), step=1.0, key=f"maxscore_{q}",
+            )
+        st.session_state.max_scores = new_max
+        if "i19_closed_corners" in count_qs:
+            st.caption("Note: Item 19 (closed corners) label says 0–3; your specified default is 4 — change it above if it should be 3.")
+
+        preview = []
+        for q in count_qs:
+            mx = float(new_max[q])
+            pre = pd.to_numeric(scored[q], errors="coerce")
+            pre = pre[pre != 999]
+            avg = float(pre.mean()) if pre.notna().any() else 0.0
+            preview.append({
+                "Question": question_excel_name(q, "english"),
+                "Max": mx,
+                "Avg pre score": round(avg, 2),
+                "Avg pre %": round(avg / mx * 100, 1) if mx else 0.0,
+            })
+        st.markdown("#### Preview (baseline, current data — current score ÷ max)")
+        st.dataframe(pd.DataFrame(preview), hide_index=True, use_container_width=True)
+
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button("Back"):
+            go_back()
+    with c2:
+        if st.button("Next: Map items into domains", type="primary"):
+            go_next()
+
+# STEP 10: Download
+elif st.session_state.step == 10:
+    st.subheader("Step 10: Preview and Download")
     clean_base = st.session_state.clean_base.copy()
-    filtered_df = st.session_state.filtered_df.copy()
     actions = st.session_state.actions
+    max_scores = st.session_state.get("max_scores") or {}
+    item_mapping = st.session_state.get("item_mapping") or ITEM_MAPPING
+    domain_mapping = st.session_state.get("domain_mapping") or DOMAIN_MAPPING
 
-    # Final analysis data applies both types of actions:
-    # - change missing to 0
-    # - drop selected questions
     clean_df = apply_actions(clean_base, actions)
-
-    # Cleaned data sheet requested by user: after removing rows, before removing question columns.
-    # It still applies the "change missing to 0" actions, but does not drop columns.
-    zero_only_actions = {q: a for q, a in actions.items() if a == "change missing to 0"}
-    cleaned_data_sheet = apply_actions(clean_base, zero_only_actions)
-
-    by_question_df = create_by_question(clean_df, BASELINE_QUESTION_COLS)
-    by_item_df = create_by_item(clean_df, st.session_state.get("item_mapping") or ITEM_MAPPING)
-    by_domain_df = create_by_domain(by_item_df, st.session_state.get("domain_mapping") or DOMAIN_MAPPING)
-
-    st.write("Clean data preview")
-    st.dataframe(clean_df.head(20), use_container_width=True)
 
     remaining_question_cols = [c for c in BASELINE_QUESTION_COLS + ENDLINE_QUESTION_COLS if c in clean_df.columns]
     remaining_missing_summary = get_remaining_missing_summary(clean_df, remaining_question_cols)
 
+    q_df = analysis_by_question(clean_df, max_scores)
+    i_df = analysis_by_item(clean_df, item_mapping, max_scores)
+    d_df = analysis_by_domain(q_df, item_mapping, domain_mapping)
+    cleaned_sheet = build_cleaned_data_sheet(clean_df, max_scores)
+
+    st.write("Question analysis preview")
+    st.dataframe(q_df, use_container_width=True, hide_index=True)
+    st.write("Domain analysis preview")
+    st.dataframe(d_df, use_container_width=True, hide_index=True)
+
     if len(remaining_missing_summary) > 0:
-        missing_columns = sorted(remaining_missing_summary["Question ID"].tolist())
-        st.error("Download is blocked. Missing is still in these columns:\n\n" + "\n".join(missing_columns))
-        st.warning("Go back to Step 4 and choose an action for these question columns, such as changing missing to 0 or dropping the question.")
+        cols = sorted(remaining_missing_summary["Question ID"].tolist())
+        st.error("Download is blocked. Missing values remain in: " + ", ".join(cols))
+        st.warning("Go back to Step 9 (Question actions) and choose an action (change missing to 0, or drop the question).")
     else:
         raw_sheet = st.session_state.get("download_raw_df")
         if raw_sheet is None:
-            raw_sheet = filtered_df
-        question_dashboard_df = create_question_dashboard(by_question_df)
-        item_dashboard_df = create_item_dashboard(by_item_df)
-        domain_dashboard_df = create_domain_dashboard(by_domain_df)
-        idela_dashboard_df = create_idela_dashboard(by_item_df)
-
-        sheets = {
-            "raw data": raw_sheet,
-            "Cleaned data": cleaned_data_sheet,
-            "BY QUESTION": by_question_df,
-            "BY ITEM": by_item_df,
-            "BY DOMAIN": by_domain_df,
-            "QUESTION DASHBOARD": question_dashboard_df,
-            "ITEM DASHBOARD": item_dashboard_df,
-            "DOMAIN DASHBOARD": domain_dashboard_df,
-            "IDELA DASHBOARD": idela_dashboard_df,
-        }
-        excel_bytes = to_excel_bytes(sheets)
-        st.success("No 999, ---, blank, or null values remain in the remaining question columns. You can download the cleaned workbook.")
+            raw_sheet = st.session_state.get("filtered_df", clean_df)
+        excel_bytes = write_new_workbook(raw_sheet, cleaned_sheet, q_df, i_df, d_df)
+        st.success("Workbook ready: raw data, cleaned data, and question / item / domain analysis.")
         st.download_button(
-            label="Download cleaned IDELA workbook",
+            label="Download IDELA analysis workbook",
             data=excel_bytes,
-            file_name="idela_cleaned_output.xlsx",
+            file_name="idela_analysis_output.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             type="primary",
         )

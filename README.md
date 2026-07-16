@@ -1,28 +1,36 @@
-# IDELA Cleaning App
+# IDELA Cleaning & Analysis App
 
-Streamlit app for cleaning IDELA baseline/endline (pre/post) data and exporting Excel analysis outputs.
+Streamlit app for cleaning IDELA baseline/endline (pre/post) data and exporting an Excel analysis workbook.
 
-## Workflow (9 steps)
+## Workflow (10 steps)
 
-1. **Upload structure** — three supported layouts: one file with pre/post in the same row, two files (baseline + endline), or one file with duplicated pre/post rows.
-2. **Map columns** — auto-suggested mapping of the case ID, round/status, essential-info, and question columns into the standard IDELA fields.
-3. **Pair pre/post & drop unpaired** — keeps a child only if they have data on BOTH the pre and post side; shows how many are dropped and why. Pairing counts live here (they were removed from Step 2 to avoid duplication).
-4. **Map questions into items** — 21 item boxes; drag questions into them. Defaults follow the standard IDELA structure.
-5. **Map items into domains** — 4 domain boxes; drag items into them. Defaults follow the standard IDELA domains.
-6. **Review rows** — per-child baseline/endline missing %, with row skipping. Text answers are not yet scored here, so a value like `no_response` is not yet counted as missing (blank/`---` are).
-7. **Score text values** — assign numeric scores to any text answers; values are then finalized to numeric.
-8. **Question missing actions** — per-question "change missing to 0" or "drop this question". Edits are made in a form and saved together when you press **Apply actions**, so there is no per-row delay.
-9. **Preview & download** — BY QUESTION / BY ITEM / BY DOMAIN / IDELA outputs plus filterable dashboard sheets. Item and domain scores use your Step 4/5 mappings.
+1. **Upload structure** — one file (pre/post same row), two files, or one file with duplicated pre/post rows. No IDELA-date field is required anymore.
+2. **Map columns** — auto-suggested mapping of case ID, round/status, essential info, and question columns.
+3. **Pair pre/post & drop unpaired** — keeps a child only if they have data on BOTH sides. Pairing is on case ID + presence of question data (no date filter).
+4. **Score text values** — assign numeric scores to any text answers; finalized to numeric.
+5. **Map questions into items** — 21 colored drag boxes (4 restful colors).
+6. **Max scores for count questions** — detects count/level questions (not 0/1) and asks for each maximum. Defaults: i5_row12/i5_row34 = 10 each (item 5 combined 20), i8 = 10, i13_market/i13_animals = 10 each, i15_row12/i15_row34 = 10 each (item 15 combined 20), i17 = 4, i19 = 4, i21 = 10.
+7. **Map items into domains** — 4 colored drag boxes.
+8. **Review rows** — per-child missing %, skip high-missing children.
+9. **Question actions** — per-question change-missing-to-0 or drop (form-based, no lag).
+10. **Preview & download** — the analysis workbook.
 
-Steps 4 and 5 use the `streamlit-sortables` drag-and-drop component (in `requirements.txt`). If it is unavailable each step falls back to a dropdown editor automatically.
+## Output workbook (5 sheets)
 
-## Run locally
+1. **raw data** — the uploaded file(s).
+2. **Cleaned data** — essential fields + question values (pre/post) + a per-child IDELA % (achieved / max).
+3. **Question Analysis** — one row per question (bilingual name): Pre score, Post score, Pre %, Post %, Post − Pre %. 0/1 questions use % of 1s (max = 1); count questions use score / max. Rows alternate two restful colors.
+4. **Item Analysis** — per item: score = mean of the sum of its question values; max = (#0/1 questions) + (sum of count maxima); % = score / max. Same columns and colors.
+5. **Domain Analysis** — per domain: average of the pre/post % of its questions; plus an IDELA row = average of the four domain %s (pre, post, change).
 
-```bash
-pip install -r requirements.txt
-streamlit run app.py
-```
+## Calculation assumptions (tell me to change any)
 
-## Deploy to Streamlit Community Cloud
+- "Score" is the average per child; missing is resolved to 0 or the question dropped in step 9 before calculating.
+- Domain % = average of its **questions'** %s (your literal wording). If you meant average of item %s instead, it's a one-line change.
+- Item 19 default max = 4 as you specified, though its label reads 0–3 (editable in step 6).
+- The charts sheet is not built yet (to be defined later).
 
-Push the repo (including `requirements.txt`) to GitHub, point the app at `app.py`, and deploy/reboot so the requirements install.
+## Run / deploy
+
+Local: `pip install -r requirements.txt` then `streamlit run app.py`.
+Cloud: push the repo including `requirements.txt` (has `streamlit-sortables`) and reboot.
