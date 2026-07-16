@@ -12,9 +12,39 @@ try:
 except Exception:
     _HAS_SORTABLES = False
 
-st.set_page_config(page_title="IDELA Cleaning App", layout="wide")
-st.title("IDELA Cleaning App")
-st.caption("Upload, map columns, review missing values, choose actions, and download a cleaned workbook.")
+st.set_page_config(page_title="IDELA Cleaning & Analysis", page_icon="📊", layout="wide")
+
+st.markdown("""
+<style>
+:root { --idela-primary:#4E6E8E; --idela-accent:#5C8768; }
+.block-container { padding-top: 2rem; max-width: 1280px; }
+h1, h2, h3 { color:#243b53; }
+h1 { letter-spacing:-.5px; }
+.stButton>button, .stDownloadButton>button, .stFormSubmitButton>button {
+    border-radius: 9px; font-weight:600; border:1px solid #d6dee6; padding:.4rem 1rem;
+}
+.stButton>button[kind="primary"], .stDownloadButton>button[kind="primary"],
+.stFormSubmitButton>button[kind="primary"] {
+    background: var(--idela-primary); border-color: var(--idela-primary);
+}
+.stButton>button[kind="primary"]:hover, .stFormSubmitButton>button[kind="primary"]:hover {
+    background:#3f5c78; border-color:#3f5c78;
+}
+div[data-testid="stProgress"] div[role="progressbar"] > div {
+    background-image: linear-gradient(90deg, #4E6E8E, #5C8768);
+}
+.step-track { display:flex; flex-wrap:wrap; gap:6px; margin:10px 0 2px; }
+.step-chip { font-size:12.5px; padding:4px 11px; border-radius:999px; background:#eef2f6;
+    color:#5b6b7b; border:1px solid #e2e8f0; white-space:nowrap; }
+.step-chip.done { background:#EBF3EC; color:#3f6b4c; border-color:#cfe6d5; }
+.step-chip.current { background:#4E6E8E; color:#fff; border-color:#4E6E8E; font-weight:700; }
+.idela-side-item { padding:3px 2px; font-size:14px; line-height:1.5; }
+section[data-testid="stSidebar"] { background:#f7f9fb; }
+</style>
+""", unsafe_allow_html=True)
+
+st.title("📊 IDELA Cleaning & Analysis")
+st.caption("A guided workflow — upload, pair pre/post, score, map to items and domains, review, and download the analysis workbook.")
 
 META_COLUMNS = [
     "caseid", "idela_child_pwd", "If_yes_due_to_pwd",
@@ -1386,11 +1416,59 @@ def go_back():
     st.rerun()
 
 
+STEP_LABELS = ["1. Upload", "2. Map Columns", "3. Pair Pre/Post", "4. Score Text",
+               "5. Questions→Items", "6. Max Scores", "7. Items→Domains",
+               "8. Review Rows", "9. Question Actions", "10. Download"]
+
+
 def show_progress():
-    labels = ["1. Upload", "2. Map Columns", "3. Pair Pre/Post", "4. Score Text", "5. Questions→Items", "6. Max Scores", "7. Items→Domains", "8. Review Rows", "9. Question Actions", "10. Download"]
     current = st.session_state.step
-    st.progress((current - 1) / (len(labels) - 1))
-    st.write(" → ".join([f"**{x}**" if i + 1 == current else x for i, x in enumerate(labels)]))
+    total = len(STEP_LABELS)
+    st.progress((current - 1) / (total - 1))
+    chips = []
+    for i, x in enumerate(STEP_LABELS):
+        n = i + 1
+        cls = "done" if n < current else ("current" if n == current else "")
+        mark = "✓ " if n < current else ""
+        chips.append(f'<span class="step-chip {cls}">{mark}{x}</span>')
+    st.markdown('<div class="step-track">' + "".join(chips) + "</div>", unsafe_allow_html=True)
+
+
+def render_sidebar():
+    with st.sidebar:
+        st.markdown("## IDELA workflow")
+        current = st.session_state.step
+        for i, x in enumerate(STEP_LABELS):
+            n = i + 1
+            if n < current:
+                st.markdown(f'<div class="idela-side-item" style="color:#3f6b4c">✓ {x}</div>', unsafe_allow_html=True)
+            elif n == current:
+                st.markdown(f'<div class="idela-side-item" style="color:#4E6E8E;font-weight:700">▸ {x}</div>', unsafe_allow_html=True)
+            else:
+                st.markdown(f'<div class="idela-side-item" style="color:#9aa7b4">• {x}</div>', unsafe_allow_html=True)
+
+        ss = st.session_state
+        status = []
+        if ss.get("paired_df") is not None:
+            status.append(f"Paired children: {len(ss['paired_df'])}")
+        if ss.get("clean_base") is not None:
+            status.append(f"Rows kept: {len(ss['clean_base'])}")
+        if ss.get("max_scores"):
+            status.append(f"Count questions set: {len(ss['max_scores'])}")
+        if status:
+            st.divider()
+            st.caption("**Status**")
+            for b in status:
+                st.caption("• " + b)
+
+        st.divider()
+        with st.expander("Need help?"):
+            st.write("Work through the steps in order using the **Back** / **Next** buttons. "
+                     "Auto-suggested choices are usually right — you only need to fix the wrong ones. "
+                     "Your progress stays as long as this browser tab is open.")
+        if st.button("Start over", use_container_width=True):
+            st.session_state.clear()
+            st.rerun()
 
 
 def mapping_scope(key: str) -> str:
@@ -1627,6 +1705,7 @@ def build_duplicated_rows_df(raw_df: pd.DataFrame, mapping: Dict[str, str], base
 
 
 init_state()
+render_sidebar()
 show_progress()
 st.divider()
 
