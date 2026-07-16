@@ -15,13 +15,19 @@ Streamlit app for cleaning IDELA baseline/endline (pre/post) data and exporting 
 9. **Question actions** — per-question change-missing-to-0 or drop (form-based, no lag).
 10. **Preview & download** — the analysis workbook.
 
-## Output workbook (5 sheets)
+## Output workbook (8 sheets)
 
+Cohort summaries:
 1. **raw data** — the uploaded file(s).
 2. **Cleaned data** — essential fields + question values (pre/post) + a per-child IDELA % (achieved / max).
 3. **Question Analysis** — one row per question (bilingual name): Pre score, Post score, Pre %, Post %, Post − Pre %. 0/1 questions use % of 1s (max = 1); count questions use score / max. Rows alternate two restful colors.
-4. **Item Analysis** — per item: score = mean of the sum of its question values; max = (#0/1 questions) + (sum of count maxima); % = score / max. Same columns and colors.
-5. **Domain Analysis** — per domain: average of the pre/post % of its questions; plus an IDELA row = average of the four domain %s (pre, post, change).
+4. **Item Analysis** — per item: score = mean of the sum of its question values; max = (#0/1 questions) + (sum of count maxima); % = score / max.
+5. **Domain Analysis** — per domain: average of the pre/post % of its questions; plus an IDELA row = average of the four domain %s.
+
+Row-level (one row per child, with AVERAGE / MALE AVERAGE / FEMALE AVERAGE / MINIMUM / MAXIMUM summary rows on top):
+6. **Questions (per child)** — each question's raw pre & post value.
+7. **Items (per child)** — each item's pre % and post % (child sum ÷ item max).
+8. **Domains (per child)** — each domain's pre % and post % (average of that child's question %s) plus IDELA pre / post / change %.
 
 ## Calculation assumptions (tell me to change any)
 

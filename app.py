@@ -133,7 +133,8 @@ SORTABLE_CSS = """
 .sortable-container { border-radius: 8px; border: 1px solid #d9d9d9; margin-bottom: 6px; }
 .sortable-container-header { font-weight: 600; padding: 6px 10px; border-radius: 8px 8px 0 0; }
 .sortable-container-body { padding: 6px; min-height: 40px; border-radius: 0 0 8px 8px; }
-.sortable-item { background: #ffffff; border: 1px solid #cfcfcf; border-radius: 6px; padding: 4px 8px; }
+.sortable-item { background: #ffffff; color: #243b53; border: 1px solid #cfcfcf; border-radius: 6px; padding: 5px 10px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; cursor: grab; }
+.sortable-item:hover { white-space: normal; overflow: visible; background: #fffdf5; box-shadow: 0 3px 12px rgba(0,0,0,.22); position: relative; z-index: 20; }
 .sortable-container:nth-child(4n+1) .sortable-container-header { background: #C6D8E8; }
 .sortable-container:nth-child(4n+2) .sortable-container-header { background: #CBE3D0; }
 .sortable-container:nth-child(4n+3) .sortable-container-header { background: #EEDFC2; }
@@ -1117,9 +1118,131 @@ def write_filterable_dashboard(writer, workbook, sheet_name: str, source_df: pd.
     ws.set_column("M:U", 14)
 
 
-def write_new_workbook(raw_df, cleaned_df, q_df, i_df, d_df) -> bytes:
-    """Raw / Cleaned / Question / Item / Domain sheets. Question & Item sheets use two
-    restful alternating row colors; Domain sheet colors each domain and highlights IDELA."""
+def _rowlevel_meta(clean_df):
+    prefer = ["caseid", "d_childs_full_name", "e_childs_sex", "f_childs_age",
+              "teacher_location", "governorate", "nationality", "district"]
+    cols = [c for c in prefer if c in clean_df.columns]
+    return cols if cols else [clean_df.columns[0]]
+
+
+def _rowlevel_assemble(clean_df, vdf, meta):
+    """Prepend AVERAGE / MALE AVERAGE / FEMALE AVERAGE / MINIMUM / MAXIMUM rows above per-child rows.
+    Returns (dataframe, number_of_stat_rows)."""
+    label_col = meta[0]
+    value_cols = list(vdf.columns)
+    header = meta + value_cols
+    sex = clean_df["e_childs_sex"].astype("string").str.lower() if "e_childs_sex" in clean_df.columns else None
+
+    def stat_row(label, sub):
+        row = {c: "" for c in meta}
+        row[label_col] = label
+        for c in value_cols:
+            col = pd.to_numeric(sub[c], errors="coerce")
+            if not col.notna().any():
+                row[c] = ""
+            elif label == "MINIMUM":
+                row[c] = round(float(col.min()), 2)
+            elif label == "MAXIMUM":
+                row[c] = round(float(col.max()), 2)
+            else:
+                row[c] = round(float(col.mean()), 2)
+        return row
+
+    stats = [stat_row("AVERAGE", vdf)]
+    if sex is not None:
+        male = vdf[sex.str.startswith("m", na=False)]
+        female = vdf[sex.str.startswith("f", na=False)]
+        if len(male):
+            stats.append(stat_row("MALE AVERAGE", male))
+        if len(female):
+            stats.append(stat_row("FEMALE AVERAGE", female))
+    stats.append(stat_row("MINIMUM", vdf))
+    stats.append(stat_row("MAXIMUM", vdf))
+
+    body = clean_df[meta].copy().reset_index(drop=True)
+    vreset = vdf.reset_index(drop=True)
+    for c in value_cols:
+        body[c] = vreset[c]
+    top = pd.DataFrame(stats, columns=header)
+    out = pd.concat([top, body[header]], ignore_index=True)
+    return out, len(stats)
+
+
+def rowlevel_questions(clean_df, max_scores=None):
+    meta = _rowlevel_meta(clean_df)
+    q_used = [q for q in BASELINE_QUESTION_COLS if q in clean_df.columns and f"{q}_post" in clean_df.columns]
+    vdf = pd.DataFrame(index=clean_df.index)
+    for q in q_used:
+        vdf[f"{q} - pre"] = pd.to_numeric(clean_df[q], errors="coerce")
+        vdf[f"{q} - post"] = pd.to_numeric(clean_df[f"{q}_post"], errors="coerce")
+    return _rowlevel_assemble(clean_df, vdf, meta)
+
+
+def rowlevel_items(clean_df, item_mapping=None, max_scores=None):
+    if item_mapping is None:
+        item_mapping = ITEM_MAPPING
+    meta = _rowlevel_meta(clean_df)
+    vdf = pd.DataFrame(index=clean_df.index)
+    for item_id in [f"ITEM_{i}" for i in range(1, 22)]:
+        qs = [q for q, it in item_mapping.items()
+              if it == item_id and q in clean_df.columns and f"{q}_post" in clean_df.columns]
+        if not qs:
+            continue
+        item_max = sum(question_max_score(q, max_scores) for q in qs)
+        pre = pd.Series(0.0, index=clean_df.index)
+        post = pd.Series(0.0, index=clean_df.index)
+        for q in qs:
+            pre = pre + pd.to_numeric(clean_df[q], errors="coerce").fillna(0)
+            post = post + pd.to_numeric(clean_df[f"{q}_post"], errors="coerce").fillna(0)
+        nm = f"{item_id} {ITEM_NAMES.get(item_id, item_id)}"
+        vdf[f"{nm} - pre %"] = (pre / item_max * 100).round(1) if item_max else 0.0
+        vdf[f"{nm} - post %"] = (post / item_max * 100).round(1) if item_max else 0.0
+    return _rowlevel_assemble(clean_df, vdf, meta)
+
+
+def rowlevel_domains(clean_df, item_mapping=None, domain_mapping=None, max_scores=None):
+    if item_mapping is None:
+        item_mapping = ITEM_MAPPING
+    if domain_mapping is None:
+        domain_mapping = DOMAIN_MAPPING
+    meta = _rowlevel_meta(clean_df)
+    item_to_domain = {}
+    for d, items in domain_mapping.items():
+        for it in items:
+            item_to_domain[it] = d
+    pre_lists = {d: [] for d in domain_mapping}
+    post_lists = {d: [] for d in domain_mapping}
+    for q, it in item_mapping.items():
+        d = item_to_domain.get(it)
+        if d is None or q not in clean_df.columns or f"{q}_post" not in clean_df.columns:
+            continue
+        mx = question_max_score(q, max_scores)
+        pre_lists[d].append(pd.to_numeric(clean_df[q], errors="coerce").fillna(0) / mx * 100)
+        post_lists[d].append(pd.to_numeric(clean_df[f"{q}_post"], errors="coerce").fillna(0) / mx * 100)
+    vdf = pd.DataFrame(index=clean_df.index)
+    dom_pre, dom_post = {}, {}
+    for d in domain_mapping:
+        if pre_lists[d]:
+            pre = sum(pre_lists[d]) / len(pre_lists[d])
+            post = sum(post_lists[d]) / len(post_lists[d])
+        else:
+            pre = pd.Series(0.0, index=clean_df.index)
+            post = pd.Series(0.0, index=clean_df.index)
+        dom_pre[d] = pre
+        dom_post[d] = post
+        vdf[f"{d} - pre %"] = pre.round(1)
+        vdf[f"{d} - post %"] = post.round(1)
+    if dom_pre:
+        idpre = sum(dom_pre.values()) / len(dom_pre)
+        idpost = sum(dom_post.values()) / len(dom_post)
+        vdf["IDELA - pre %"] = idpre.round(1)
+        vdf["IDELA - post %"] = idpost.round(1)
+        vdf["IDELA - change %"] = (idpost - idpre).round(1)
+    return _rowlevel_assemble(clean_df, vdf, meta)
+
+
+def write_new_workbook(raw_df, cleaned_df, q_df, i_df, d_df, rq=None, ri=None, rd=None) -> bytes:
+    """Cohort sheets (Question/Item/Domain) plus per-child row-level sheets with AVERAGE/MIN/MAX rows."""
     out = io.BytesIO()
     with pd.ExcelWriter(out, engine="xlsxwriter") as writer:
         wb = writer.book
@@ -1143,10 +1266,11 @@ def write_new_workbook(raw_df, cleaned_df, q_df, i_df, d_df) -> bytes:
             return cache[key]
 
         def kind_of(col):
-            if "%" in str(col):
+            c = str(col)
+            if "%" in c:
                 return "pct"
-            if col in ("Pre score", "Post score", "Max score", "IDELA pre %", "IDELA post %", "IDELA change %"):
-                return "num" if "%" not in str(col) else "pct"
+            if col in ("Pre score", "Post score", "Max score"):
+                return "num"
             return "text"
 
         def dump_plain(name, df):
@@ -1181,6 +1305,32 @@ def write_new_workbook(raw_df, cleaned_df, q_df, i_df, d_df) -> bytes:
                 ws.set_column(1, len(cols) - 1, 13)
             ws.freeze_panes(1, 0)
 
+        def dump_rowlevel(name, df, n_stat, first_col_width=26):
+            ws = wb.add_worksheet(name[:31])
+            writer.sheets[name[:31]] = ws
+            cols = list(df.columns)
+            for j, c in enumerate(cols):
+                ws.write(0, j, c, header_fmt)
+            stat_bg = RESTFUL_COLORS["warm_sand"]["light"]
+            for i in range(len(df)):
+                is_stat = i < n_stat
+                bg = stat_bg if is_stat else None
+                for j, c in enumerate(cols):
+                    v = df.iloc[i][c]
+                    if v == "" or (not isinstance(v, str) and pd.isna(v)):
+                        ws.write(i + 1, j, "", cell_fmt(bg, "text", is_stat))
+                        continue
+                    try:
+                        val = float(v)
+                        k = "pct" if "%" in str(c) else "num"
+                        ws.write(i + 1, j, val, cell_fmt(bg, k, is_stat))
+                    except (ValueError, TypeError):
+                        ws.write(i + 1, j, str(v), cell_fmt(bg, "text", is_stat))
+            ws.set_column(0, 0, first_col_width)
+            if len(cols) > 1:
+                ws.set_column(1, len(cols) - 1, 13)
+            ws.freeze_panes(n_stat + 1, 1)
+
         dump_plain("raw data", raw_df)
         dump_plain("Cleaned data", cleaned_df)
 
@@ -1196,6 +1346,13 @@ def write_new_workbook(raw_df, cleaned_df, q_df, i_df, d_df) -> bytes:
             else:
                 dstyles.append((med[di % 4], False)); di += 1
         dump_colored("Domain Analysis", d_df, dstyles, first_col_width=36)
+
+        if rq is not None:
+            dump_rowlevel("Questions (per child)", rq[0], rq[1])
+        if ri is not None:
+            dump_rowlevel("Items (per child)", ri[0], ri[1], first_col_width=26)
+        if rd is not None:
+            dump_rowlevel("Domains (per child)", rd[0], rd[1], first_col_width=26)
     return out.getvalue()
 
 
@@ -1739,14 +1896,19 @@ elif st.session_state.step == 3:
     if reason_rows:
         st.dataframe(pd.DataFrame(reason_rows), hide_index=True, use_container_width=True)
 
-    dropped_df = source_df.loc[~paired_mask].copy()
-    if len(dropped_df) > 0:
-        with st.expander(f"Show {len(dropped_df)} dropped child record(s)"):
-            show_cols = [c for c in [id_col, "d_childs_full_name", "e_childs_sex", "f_childs_age", "teacher_location"] if c and c in dropped_df.columns]
-            disp = dropped_df[show_cols].copy() if show_cols else dropped_df.iloc[:, :4].copy()
-            disp["has pre?"] = has_pre.loc[dropped_df.index].map({True: "yes", False: "no"}).values
-            disp["has post?"] = has_post.loc[dropped_df.index].map({True: "yes", False: "no"}).values
+    # Records that had data on exactly one side (a real assessment missing its pre or post).
+    # Fully-empty records (no pre and no post) are dropped silently and only counted above.
+    partial_mask = (has_pre != has_post)
+    partial_df = source_df.loc[partial_mask].copy()
+    if len(partial_df) > 0:
+        with st.expander(f"Show {len(partial_df)} record(s) dropped for missing one side (pre or post)"):
+            show_cols = [c for c in [id_col, "d_childs_full_name", "e_childs_sex", "f_childs_age", "teacher_location"] if c and c in partial_df.columns]
+            disp = partial_df[show_cols].copy() if show_cols else partial_df.iloc[:, :4].copy()
+            disp["has pre?"] = has_pre.loc[partial_df.index].map({True: "yes", False: "no"}).values
+            disp["has post?"] = has_post.loc[partial_df.index].map({True: "yes", False: "no"}).values
             st.dataframe(disp, hide_index=True, use_container_width=True)
+    elif (total - kept) > 0:
+        st.caption("All dropped records simply had no data on either side; nothing to review individually.")
 
     paired_df = source_df.loc[paired_mask].copy()
     st.session_state.paired_df = paired_df
@@ -2064,8 +2226,6 @@ elif st.session_state.step == 5:
     def _q_card(qid):
         lab = QUESTION_LABELS.get(qid, qid)
         eng = lab.split(" | ", 1)[1].strip() if " | " in lab else str(lab)
-        if len(eng) > 42:
-            eng = eng[:42] + "…"
         return f"{qid} · {eng}"
 
     def _item_header(item_id):
@@ -2282,7 +2442,10 @@ elif st.session_state.step == 10:
         raw_sheet = st.session_state.get("download_raw_df")
         if raw_sheet is None:
             raw_sheet = st.session_state.get("filtered_df", clean_df)
-        excel_bytes = write_new_workbook(raw_sheet, cleaned_sheet, q_df, i_df, d_df)
+        rq = rowlevel_questions(clean_df, max_scores)
+        ri = rowlevel_items(clean_df, item_mapping, max_scores)
+        rd = rowlevel_domains(clean_df, item_mapping, domain_mapping, max_scores)
+        excel_bytes = write_new_workbook(raw_sheet, cleaned_sheet, q_df, i_df, d_df, rq, ri, rd)
         st.success("Workbook ready: raw data, cleaned data, and question / item / domain analysis.")
         st.download_button(
             label="Download IDELA analysis workbook",
