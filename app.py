@@ -1238,6 +1238,11 @@ def rowlevel_domains(clean_df, item_mapping=None, domain_mapping=None, max_score
         item_mapping = ITEM_MAPPING
     if domain_mapping is None:
         domain_mapping = DOMAIN_MAPPING
+    # Group children by gender (males first, then females) so the T.TEST ranges are contiguous.
+    if "e_childs_sex" in clean_df.columns:
+        _gkey = clean_df["e_childs_sex"].astype(str).str.lower().map(
+            lambda v: 0 if v.startswith("m") else (1 if v.startswith("f") else 2))
+        clean_df = clean_df.loc[_gkey.sort_values(kind="stable").index]
     meta = _rowlevel_meta(clean_df)
     item_to_domain = {}
     for d, items in domain_mapping.items():
@@ -1371,14 +1376,87 @@ def write_new_workbook(raw_df, cleaned_df, q_df, i_df, d_df, rq=None, ri=None, r
         dump_colored("Question Analysis", q_df, [(zebra[i % 2], False) for i in range(len(q_df))])
         dump_colored("Item Analysis", i_df, [(zebra[i % 2], False) for i in range(len(i_df))])
 
+        from xlsxwriter.utility import xl_col_to_name
+
+        # Locate contiguous male / female row ranges in the per-child domains sheet (rd).
+        male_rows = female_rows = None
+        rd_cols = []
+        if rd is not None:
+            rd_df, rd_nstat = rd[0], rd[1]
+            rd_cols = list(rd_df.columns)
+            if "e_childs_sex" in rd_cols:
+                body_sex = rd_df["e_childs_sex"].iloc[rd_nstat:].astype(str).str.lower().tolist()
+                body_start = rd_nstat + 2  # +1 header, +n_stat rows, then body begins
+                m_idx = [k for k, x in enumerate(body_sex) if x.startswith("m")]
+                f_idx = [k for k, x in enumerate(body_sex) if x.startswith("f")]
+                if len(m_idx) >= 2:
+                    male_rows = (body_start + min(m_idx), body_start + max(m_idx))
+                if len(f_idx) >= 2:
+                    female_rows = (body_start + min(f_idx), body_start + max(f_idx))
+
+        PC = "Domains (per child)"
+
+        def _pc_cols(label):
+            if str(label).startswith("IDELA"):
+                return ("IDELA - pre %", "IDELA - post %")
+            return (f"{label} - pre %", f"{label} - post %")
+
+        dws = wb.add_worksheet("Domain Analysis")
+        writer.sheets["Domain Analysis"] = dws
+        base_cols = list(d_df.columns)
+        all_cols = base_cols + ["T-test male (p)", "T-test female (p)"]
+        for j, c in enumerate(all_cols):
+            dws.write(0, j, c, header_fmt)
+
+        def tfmt(bg, bold):
+            d = {"border": 1, "valign": "vcenter", "num_format": "0.0000"}
+            if bg:
+                d["bg_color"] = bg
+            if bold:
+                d["bold"] = True
+            return wb.add_format(d)
+
         med = [RESTFUL_COLORS[n]["medium"] for n in RESTFUL_ORDER]
-        dstyles, di = [], 0
-        for _, r in d_df.iterrows():
-            if str(r["Domain"]).startswith("IDELA"):
-                dstyles.append((RESTFUL_COLORS["warm_sand"]["medium"], True))
-            else:
-                dstyles.append((med[di % 4], False)); di += 1
-        dump_colored("Domain Analysis", d_df, dstyles, first_col_width=36)
+        di = 0
+        for i in range(len(d_df)):
+            label = str(d_df.iloc[i]["Domain"])
+            is_idela = label.startswith("IDELA")
+            bg = RESTFUL_COLORS["warm_sand"]["medium"] if is_idela else med[di % 4]
+            if not is_idela:
+                di += 1
+            bold = is_idela
+            for j, c in enumerate(base_cols):
+                v = d_df.iloc[i][c]
+                k = kind_of(c)
+                if k in ("pct", "num"):
+                    try:
+                        val = float(v)
+                    except Exception:
+                        val = 0.0
+                else:
+                    val = "" if pd.isna(v) else str(v)
+                dws.write(i + 1, j, val, cell_fmt(bg, k, bold))
+            pre_name, post_name = _pc_cols(label)
+            for gi, rng in enumerate([male_rows, female_rows]):
+                cj = len(base_cols) + gi
+                if rng and pre_name in rd_cols and post_name in rd_cols:
+                    pL = xl_col_to_name(rd_cols.index(pre_name))
+                    qL = xl_col_to_name(rd_cols.index(post_name))
+                    r1, r2 = rng
+                    formula = f"=_xlfn.T.TEST('{PC}'!{pL}{r1}:{pL}{r2},'{PC}'!{qL}{r1}:{qL}{r2},2,1)"
+                    dws.write_formula(i + 1, cj, formula, tfmt(bg, bold))
+                else:
+                    dws.write(i + 1, cj, "n/a", cell_fmt(bg, "text", bold))
+        dws.set_column(0, 0, 36)
+        dws.set_column(1, len(all_cols) - 1, 15)
+
+        # Highlight significant changes (p < 0.05) in the two t-test columns.
+        sig_fmt = wb.add_format({"bg_color": "#C6EFCE", "font_color": "#006100", "bold": True,
+                                 "num_format": "0.0000", "border": 1})
+        if len(d_df) > 0:
+            dws.conditional_format(1, len(base_cols), len(d_df), len(base_cols) + 1,
+                                   {"type": "cell", "criteria": "<", "value": 0.05, "format": sig_fmt})
+        dws.freeze_panes(1, 0)
 
         if rq is not None:
             dump_rowlevel("Questions (per child)", rq[0], rq[1])
