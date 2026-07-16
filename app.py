@@ -331,6 +331,7 @@ def init_state():
         "max_scores": {},
         "qi_applied": False,
         "di_applied": False,
+        "rows_applied": False,
         "value_recode_mapping": {},
         "actions": {},
         "selected_delete_indices": set(),
@@ -2108,89 +2109,85 @@ elif st.session_state.step == 4:
 # STEP 8: Row review
 elif st.session_state.step == 8:
     st.subheader("Step 8: Review rows with high missing percentage")
+    if st.session_state.get("_last_step") != 8:
+        st.session_state.rows_applied = False
     mapped_df = (st.session_state.scored_df.copy() if st.session_state.get("scored_df") is not None
                  else (st.session_state.paired_df.copy() if st.session_state.get("paired_df") is not None
                        else st.session_state.mapped_df.copy()))
-
     filtered_df = mapped_df.copy()
-
-    filtered_df.insert(0, "Delete Action", "")
-    filtered_df.insert(1, "baseline missing %", missing_pct(filtered_df, BASELINE_QUESTION_COLS))
-    filtered_df.insert(2, "endline missing %", missing_pct(filtered_df, ENDLINE_QUESTION_COLS))
+    filtered_df.insert(0, "baseline missing %", missing_pct(filtered_df, BASELINE_QUESTION_COLS))
+    filtered_df.insert(1, "endline missing %", missing_pct(filtered_df, ENDLINE_QUESTION_COLS))
     st.session_state.filtered_df = filtered_df
 
     st.write(f"Rows after pairing: **{len(filtered_df)}**")
-    high_missing = filtered_df[(filtered_df["baseline missing %"] > 0.30) | (filtered_df["endline missing %"] > 0.30)].copy()
-    st.warning(f"Rows with baseline or endline missing above 30%: {len(high_missing)}")
+    high = filtered_df[(filtered_df["baseline missing %"] > 0.30) | (filtered_df["endline missing %"] > 0.30)].copy()
+    st.warning(f"Rows with baseline or endline missing above 30%: {len(high)}")
 
-    delete_indices = []
-    if len(high_missing) > 0:
-        high_missing_display = high_missing.copy()
-        high_missing_display["baseline missing %"] *= 100
-        high_missing_display["endline missing %"] *= 100
-        display_cols = [c for c in ["caseid", "d_childs_full_name", "child_name", "student_name", "e_childs_sex", "f_childs_age", "teacher_location"] if c in high_missing_display.columns]
-        display_cols += ["baseline missing %", "endline missing %"]
-
-        c1, c2, c3, c4 = st.columns(4)
-        with c1:
-            page_size = st.selectbox("Rows per page", [50, 100, 200, 500], index=1)
-        total_pages = max(1, (len(high_missing_display) - 1) // page_size + 1)
-        with c2:
-            page = st.number_input("Page", min_value=1, max_value=total_pages, value=1, step=1)
-        start = (page - 1) * page_size
-        end = start + page_size
-        page_df = high_missing_display.iloc[start:end].copy()
-        current_page_indices = set(page_df.index)
-
-        with c3:
-            if st.button("Select all on this page"):
-                st.session_state.selected_delete_indices |= current_page_indices
+    if len(high) > 0:
+        b1, b2 = st.columns(2)
+        with b1:
+            if st.button("Select all high-missing rows"):
+                st.session_state.selected_delete_indices = set(high.index)
+                st.session_state.rows_applied = False
                 st.rerun()
-        with c4:
-            if st.button("Clear this page"):
-                st.session_state.selected_delete_indices -= current_page_indices
-                st.rerun()
-        c5, c6 = st.columns(2)
-        with c5:
-            if st.button("Select ALL high-missing rows"):
-                st.session_state.selected_delete_indices = set(high_missing_display.index)
-                st.rerun()
-        with c6:
-            if st.button("Clear ALL selections"):
+        with b2:
+            if st.button("Clear selection"):
                 st.session_state.selected_delete_indices = set()
+                st.session_state.rows_applied = False
                 st.rerun()
 
-        page_df["Select Delete"] = page_df.index.isin(st.session_state.selected_delete_indices)
-        edited_page = st.data_editor(
-            page_df[["Select Delete"] + display_cols],
-            use_container_width=True,
-            hide_index=False,
-            key=f"delete_editor_page_{page}_{page_size}",
-            column_config={
-                "baseline missing %": st.column_config.NumberColumn("baseline missing %", format="%.1f%%"),
-                "endline missing %": st.column_config.NumberColumn("endline missing %", format="%.1f%%"),
-            },
-        )
-        selected_on_page = set(edited_page.index[edited_page["Select Delete"] == True].tolist())
-        st.session_state.selected_delete_indices -= current_page_indices
-        st.session_state.selected_delete_indices |= selected_on_page
-        delete_indices = list(st.session_state.selected_delete_indices)
-        st.info(f"Selected rows to delete: **{len(delete_indices)}** out of **{len(high_missing_display)}** high-missing rows. Showing page **{page}** of **{total_pages}**.")
+        disp_cols = [c for c in ["caseid", "d_childs_full_name", "e_childs_sex", "f_childs_age"] if c in high.columns]
+        show = high.copy()
+        show["baseline missing %"] = show["baseline missing %"] * 100
+        show["endline missing %"] = show["endline missing %"] * 100
+        show.insert(0, "Delete?", show.index.isin(st.session_state.selected_delete_indices))
+        editor_cols = ["Delete?"] + disp_cols + ["baseline missing %", "endline missing %"]
 
-    clean_base = filtered_df.drop(index=delete_indices).copy()
-    clean_base = clean_base.drop(columns=["Delete Action", "baseline missing %", "endline missing %"], errors="ignore")
-    st.session_state.clean_base = clean_base
+        st.caption("Tick the rows to delete, then click **Apply row deletions**. Ticking inside the table no longer refreshes the page.")
+        with st.form("rows_form", clear_on_submit=False):
+            edited_rows = st.data_editor(
+                show[editor_cols],
+                use_container_width=True, hide_index=True, height=380,
+                column_config={
+                    "Delete?": st.column_config.CheckboxColumn("Delete?"),
+                    "baseline missing %": st.column_config.ProgressColumn("Pre missing %", format="%.1f%%", min_value=0, max_value=100),
+                    "endline missing %": st.column_config.ProgressColumn("Post missing %", format="%.1f%%", min_value=0, max_value=100),
+                },
+                disabled=disp_cols + ["baseline missing %", "endline missing %"],
+                key="rows_editor_form",
+            )
+            applied_rows = st.form_submit_button("Apply row deletions", type="primary")
+        if applied_rows:
+            mask = list(edited_rows["Delete?"].values)
+            st.session_state.selected_delete_indices = set(high.index[mask])
+            st.session_state.rows_applied = True
+            st.rerun()
+    else:
+        st.success("No rows exceed 30% missing — nothing to delete.")
+        if not st.session_state.get("rows_applied"):
+            if st.button("Apply (keep all rows)", type="primary"):
+                st.session_state.selected_delete_indices = set()
+                st.session_state.rows_applied = True
+                st.rerun()
 
-    c1, c2 = st.columns(2)
-    with c1:
+    if st.session_state.get("rows_applied"):
+        delete_indices = [i for i in st.session_state.selected_delete_indices if i in filtered_df.index]
+        clean_base = filtered_df.drop(index=delete_indices).drop(columns=["baseline missing %", "endline missing %"], errors="ignore").copy()
+        st.session_state.clean_base = clean_base
+        st.success(f"{len(delete_indices)} row(s) will be deleted — {len(clean_base)} row(s) kept.")
+        cc1, cc2 = st.columns(2)
+        with cc1:
+            if st.button("Back"):
+                go_back()
+        with cc2:
+            if st.button("Next: Question actions", type="primary"):
+                st.session_state.actions = {}
+                st.session_state.qa_ready = False
+                go_next()
+    else:
+        st.info("Select rows (if any) and click **Apply row deletions** to continue.")
         if st.button("Back"):
             go_back()
-    with c2:
-        if st.button("Next: Question actions", type="primary"):
-            st.session_state.actions = {}
-            st.session_state.actions_confirmed = False
-            st.session_state.qa_ready = False
-            go_next()
 
 # STEP 9: Question actions
 elif st.session_state.step == 9:
@@ -2198,16 +2195,21 @@ elif st.session_state.step == 9:
     if st.session_state.get("_last_step") != 9:
         st.session_state.qa_ready = False
     clean_base = st.session_state.clean_base.copy()
-    st.info(f"Question missing percentages are calculated using **{len(clean_base)} cleaned rows**.")
+    st.info(f"Missing percentages use **{len(clean_base)} cleaned rows**. Choose an action per question, then click "
+            "**Apply actions**. 'Set all to change missing to 0' can be used any time, but you must finish with "
+            "**Apply actions** before you can continue.")
 
     action_options = ["change missing to 0", "drop this question"]
     valid_actions = set(action_options)
 
-    question_review_rows = []
+    base_cols_order = []
+    rows = []
     for base_col in BASELINE_QUESTION_COLS:
+        if base_col not in clean_base.columns:
+            continue
         post_col = f"{base_col}_post"
-        question_name = QUESTION_LABELS.get(base_col, base_col)
-        arabic_name, english_name = question_name.split(" | ", 1) if " | " in question_name else ("", question_name)
+        lab = QUESTION_LABELS.get(base_col, base_col)
+        eng = lab.split(" | ", 1)[1].strip() if " | " in lab else str(lab)
         base_missing = question_missing_pct(clean_base, base_col)
         end_missing = question_missing_pct(clean_base, post_col)
         high = base_missing >= 0.30 or end_missing >= 0.30
@@ -2215,37 +2217,25 @@ elif st.session_state.step == 9:
         current = st.session_state.actions.get(base_col, default_action)
         if current not in valid_actions:
             current = default_action
-        question_review_rows.append({
-            "Baseline ID": base_col,
-            "Endline ID": post_col,
-            "Arabic": arabic_name,
-            "English": english_name,
-            "% Missing Baseline": base_missing * 100,
-            "% Missing Endline": end_missing * 100,
-            "High Missing": "YES" if high else "",
+        base_cols_order.append(base_col)
+        rows.append({
+            "Question": f"{base_col} — {eng}",
+            "Pre missing %": round(base_missing * 100, 1),
+            "Post missing %": round(end_missing * 100, 1),
             "Action": current,
         })
-    question_review_df = pd.DataFrame(question_review_rows)
+    question_review_df = pd.DataFrame(rows)
 
-    st.warning("Questions with baseline or endline missing ≥ 30% are flagged 'High Missing' and default to 'drop this question'. "
-               "Change any Action, then press **Apply actions** — all edits are saved together on Apply, so there is no per-row delay.")
-
-    # A form batches every edit and only reruns the app when you press a submit button.
-    # This removes the previous lag where a change registered only after clicking another row.
     with st.form("question_actions_form", clear_on_submit=False):
         edited_actions = st.data_editor(
             question_review_df,
             column_config={
-                "Baseline ID": st.column_config.TextColumn("Baseline ID", disabled=True),
-                "Endline ID": st.column_config.TextColumn("Endline ID", disabled=True),
-                "Arabic": st.column_config.TextColumn("Arabic", disabled=True),
-                "English": st.column_config.TextColumn("English", disabled=True),
-                "% Missing Baseline": st.column_config.ProgressColumn("% Missing Baseline", format="%.1f%%", min_value=0, max_value=100),
-                "% Missing Endline": st.column_config.ProgressColumn("% Missing Endline", format="%.1f%%", min_value=0, max_value=100),
-                "High Missing": st.column_config.TextColumn("High Missing", disabled=True),
-                "Action": st.column_config.SelectboxColumn("Action", options=action_options, required=True),
+                "Question": st.column_config.TextColumn("Question", disabled=True, width="large"),
+                "Pre missing %": st.column_config.ProgressColumn("Pre missing %", format="%.1f%%", min_value=0, max_value=100),
+                "Post missing %": st.column_config.ProgressColumn("Post missing %", format="%.1f%%", min_value=0, max_value=100),
+                "Action": st.column_config.SelectboxColumn("Action", options=action_options, required=True, width="medium"),
             },
-            disabled=["Baseline ID", "Endline ID", "Arabic", "English", "% Missing Baseline", "% Missing Endline", "High Missing"],
+            disabled=["Question", "Pre missing %", "Post missing %"],
             hide_index=True,
             use_container_width=True,
             height=520,
@@ -2258,17 +2248,16 @@ elif st.session_state.step == 9:
             submitted = st.form_submit_button("Apply actions", type="primary")
 
     if set_all_zero:
-        st.session_state.actions = {r["Baseline ID"]: "change missing to 0" for _, r in question_review_df.iterrows()}
-        st.session_state.qa_ready = True
+        st.session_state.actions = {q: "change missing to 0" for q in base_cols_order}
+        st.session_state.qa_ready = False
         st.rerun()
 
     if submitted:
-        ea = edited_actions.copy()
-        ea["Action"] = ea.apply(
-            lambda r: r["Action"] if r["Action"] in valid_actions else ("drop this question" if r["High Missing"] == "YES" else "change missing to 0"),
-            axis=1,
-        )
-        st.session_state.actions = dict(zip(ea["Baseline ID"], ea["Action"]))
+        acts = list(edited_actions["Action"].values)
+        new_actions = {}
+        for q, a in zip(base_cols_order, acts):
+            new_actions[q] = a if a in valid_actions else "change missing to 0"
+        st.session_state.actions = new_actions
         st.session_state.qa_ready = True
         st.rerun()
 
@@ -2277,8 +2266,7 @@ elif st.session_state.step == 9:
         if dropped:
             st.warning(f"{len(dropped)} question(s) will be dropped from baseline and endline.")
             drop_df = pd.DataFrame({
-                "Baseline ID": dropped,
-                "English": [QUESTION_LABELS.get(q, q).split(" | ", 1)[-1] for q in dropped],
+                "Question": [f"{q} — " + QUESTION_LABELS.get(q, q).split(" | ", 1)[-1] for q in dropped],
             })
             st.dataframe(drop_df, hide_index=True, use_container_width=True)
         else:
