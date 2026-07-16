@@ -299,6 +299,8 @@ def init_state():
         "domain_mapping": {k: list(v) for k, v in DOMAIN_MAPPING.items()},
         "qa_ready": False,
         "max_scores": {},
+        "qi_applied": False,
+        "di_applied": False,
         "value_recode_mapping": {},
         "actions": {},
         "selected_delete_indices": set(),
@@ -2248,34 +2250,45 @@ elif st.session_state.step == 5:
     containers.append({"header": UNASSIGNED_Q, "items": un_cards})
 
     use_dropdown = st.checkbox("Use dropdown editor instead of drag & drop", value=not _HAS_SORTABLES, key="itemmap_dropdown")
+    st.caption("Drag cards between item boxes (or use the dropdowns), then click **Apply mapping**. "
+               "Dragging no longer refreshes the page — your arrangement is saved only when you click Apply.")
 
-    new_map = {}
-    if _HAS_SORTABLES and not use_dropdown:
-        result = sort_items(containers, multi_containers=True, direction="vertical", custom_style=SORTABLE_CSS)
-        for cont in result:
-            item_id = header_to_item.get(cont["header"])
-            if item_id is None:
-                continue
-            for card in cont["items"]:
-                q = card_to_qid.get(card)
-                if q:
-                    new_map[q] = item_id
-    else:
-        if not _HAS_SORTABLES:
-            st.warning("Drag-and-drop component not installed. Add `streamlit-sortables` to requirements.txt for the drag view. Using dropdown editor for now.")
-        item_choices = [f"{i} · {ITEM_NAMES.get(i, i)}" for i in ordered_items] + ["(unassigned)"]
-        item_label_to_id = {f"{i} · {ITEM_NAMES.get(i, i)}": i for i in ordered_items}
-        for q in all_qids:
-            di = current_map.get(q)
-            dl = f"{di} · {ITEM_NAMES.get(di, di)}" if di in ordered_items else "(unassigned)"
-            idx = item_choices.index(dl) if dl in item_choices else len(item_choices) - 1
-            choice = st.selectbox(_q_card(q), item_choices, index=idx, key=f"itemmap_{q}")
-            if choice in item_label_to_id:
-                new_map[q] = item_label_to_id[choice]
+    pending = {}
+    with st.form("qi_form", clear_on_submit=False):
+        if _HAS_SORTABLES and not use_dropdown:
+            result = sort_items(containers, multi_containers=True, direction="vertical", custom_style=SORTABLE_CSS)
+            for cont in result:
+                item_id = header_to_item.get(cont["header"])
+                if item_id is None:
+                    continue
+                for card in cont["items"]:
+                    q = card_to_qid.get(card)
+                    if q:
+                        pending[q] = item_id
+        else:
+            if not _HAS_SORTABLES:
+                st.warning("Drag-and-drop component not installed. Add `streamlit-sortables` to requirements.txt for the drag view. Using dropdown editor for now.")
+            item_choices = [f"{i} · {ITEM_NAMES.get(i, i)}" for i in ordered_items] + ["(unassigned)"]
+            item_label_to_id = {f"{i} · {ITEM_NAMES.get(i, i)}": i for i in ordered_items}
+            for q in all_qids:
+                di = current_map.get(q)
+                dl = f"{di} · {ITEM_NAMES.get(di, di)}" if di in ordered_items else "(unassigned)"
+                idx = item_choices.index(dl) if dl in item_choices else len(item_choices) - 1
+                choice = st.selectbox(_q_card(q), item_choices, index=idx, key=f"itemmap_{q}")
+                if choice in item_label_to_id:
+                    pending[q] = item_label_to_id[choice]
+        applied = st.form_submit_button("Apply mapping", type="primary")
 
-    st.session_state.item_mapping = new_map
+    if applied:
+        st.session_state.item_mapping = pending
+        st.session_state.qi_applied = True
+        st.rerun()
 
-    empty_items = [it for it in ordered_items if not any(v == it for v in new_map.values())]
+    if st.session_state.get("qi_applied"):
+        st.success("Mapping applied and saved. You can adjust and Apply again, or continue.")
+
+    saved_map = st.session_state.item_mapping or {}
+    empty_items = [it for it in ordered_items if not any(v == it for v in saved_map.values())]
     if empty_items:
         st.warning("Items with no questions yet: " + ", ".join(f"{i} ({ITEM_NAMES.get(i, i)})" for i in empty_items))
 
@@ -2284,8 +2297,12 @@ elif st.session_state.step == 5:
         if st.button("Back"):
             go_back()
     with c2:
-        if st.button("Next: Set count-question max scores", type="primary"):
-            go_next()
+        if st.session_state.get("qi_applied"):
+            if st.button("Next: Set count-question max scores", type="primary"):
+                go_next()
+        else:
+            st.button("Next: Set count-question max scores", type="primary", disabled=True)
+            st.caption("Click **Apply mapping** first to save your arrangement.")
 
 # STEP 7: Map items into domains (drag and drop)
 elif st.session_state.step == 7:
@@ -2320,32 +2337,43 @@ elif st.session_state.step == 7:
     containers.append({"header": UNASSIGNED_I, "items": un_cards})
 
     use_dropdown = st.checkbox("Use dropdown editor instead of drag & drop", value=not _HAS_SORTABLES, key="domainmap_dropdown")
+    st.caption("Drag items between domain boxes (or use the dropdowns), then click **Apply mapping**. "
+               "Dragging no longer refreshes the page — your arrangement is saved only when you click Apply.")
 
-    new_domains = {d: [] for d in domain_names}
-    if _HAS_SORTABLES and not use_dropdown:
-        result = sort_items(containers, multi_containers=True, direction="vertical", custom_style=SORTABLE_CSS)
-        for cont in result:
-            dname = header_to_domain.get(cont["header"])
-            if dname is None:
-                continue
-            for card in cont["items"]:
-                it = card_to_item.get(card)
-                if it:
-                    new_domains[dname].append(it)
-    else:
-        if not _HAS_SORTABLES:
-            st.warning("Drag-and-drop component not installed. Add `streamlit-sortables` to requirements.txt for the drag view. Using dropdown editor for now.")
-        choices = domain_names + ["(unassigned)"]
-        for it in ordered_items:
-            dd = item_to_domain.get(it)
-            idx = choices.index(dd) if dd in domain_names else len(choices) - 1
-            choice = st.selectbox(_item_card2(it), choices, index=idx, key=f"domainmap_{it}")
-            if choice in domain_names:
-                new_domains[choice].append(it)
+    pending = {d: [] for d in domain_names}
+    with st.form("di_form", clear_on_submit=False):
+        if _HAS_SORTABLES and not use_dropdown:
+            result = sort_items(containers, multi_containers=True, direction="vertical", custom_style=SORTABLE_CSS)
+            for cont in result:
+                dname = header_to_domain.get(cont["header"])
+                if dname is None:
+                    continue
+                for card in cont["items"]:
+                    it = card_to_item.get(card)
+                    if it:
+                        pending[dname].append(it)
+        else:
+            if not _HAS_SORTABLES:
+                st.warning("Drag-and-drop component not installed. Add `streamlit-sortables` to requirements.txt for the drag view. Using dropdown editor for now.")
+            choices = domain_names + ["(unassigned)"]
+            for it in ordered_items:
+                dd = item_to_domain.get(it)
+                idx = choices.index(dd) if dd in domain_names else len(choices) - 1
+                choice = st.selectbox(_item_card2(it), choices, index=idx, key=f"domainmap_{it}")
+                if choice in domain_names:
+                    pending[choice].append(it)
+        applied = st.form_submit_button("Apply mapping", type="primary")
 
-    st.session_state.domain_mapping = new_domains
+    if applied:
+        st.session_state.domain_mapping = pending
+        st.session_state.di_applied = True
+        st.rerun()
 
-    unassigned_items = [it for it in ordered_items if all(it not in v for v in new_domains.values())]
+    if st.session_state.get("di_applied"):
+        st.success("Mapping applied and saved. You can adjust and Apply again, or continue.")
+
+    saved_domains = st.session_state.domain_mapping or {}
+    unassigned_items = [it for it in ordered_items if all(it not in v for v in saved_domains.values())]
     if unassigned_items:
         st.warning("Items not in any domain (excluded from domain scores): " + ", ".join(unassigned_items))
 
@@ -2354,8 +2382,12 @@ elif st.session_state.step == 7:
         if st.button("Back"):
             go_back()
     with c2:
-        if st.button("Next: Review rows", type="primary"):
-            go_next()
+        if st.session_state.get("di_applied"):
+            if st.button("Next: Review rows", type="primary"):
+                go_next()
+        else:
+            st.button("Next: Review rows", type="primary", disabled=True)
+            st.caption("Click **Apply mapping** first to save your arrangement.")
 
 # STEP 6: Set maximum score for count/number questions
 elif st.session_state.step == 6:
