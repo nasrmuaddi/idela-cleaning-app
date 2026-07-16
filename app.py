@@ -115,7 +115,7 @@ COUNT_QUESTION_DEFAULT_MAX = {
     "i15_row12_letters_count": 10,
     "i15_row34_letters_count": 10,
     "i17_writing_level": 4,
-    "i19_closed_corners": 4,
+    "i19_closed_corners": 3,
     "i21_steps": 10,
 }
 
@@ -2116,6 +2116,8 @@ elif st.session_state.step == 8:
 # STEP 9: Question actions
 elif st.session_state.step == 9:
     st.subheader("Step 9: Question Missing Review and Actions")
+    if st.session_state.get("_last_step") != 9:
+        st.session_state.qa_ready = False
     clean_base = st.session_state.clean_base.copy()
     st.info(f"Question missing percentages are calculated using **{len(clean_base)} cleaned rows**.")
 
@@ -2416,22 +2418,9 @@ elif st.session_state.step == 6:
                 min_value=1.0, value=float(default), step=1.0, key=f"maxscore_{q}",
             )
         st.session_state.max_scores = new_max
-        if "i19_closed_corners" in count_qs:
-            st.caption("Note: Item 19 (closed corners) label says 0–3; your specified default is 4 — change it above if it should be 3.")
 
-        preview = []
-        for q in count_qs:
-            mx = float(new_max[q])
-            pre = pd.to_numeric(scored[q], errors="coerce")
-            pre = pre[pre != 999]
-            avg = float(pre.mean()) if pre.notna().any() else 0.0
-            preview.append({
-                "Question": question_excel_name(q, "english"),
-                "Max": mx,
-                "Avg pre score": round(avg, 2),
-                "Avg pre %": round(avg / mx * 100, 1) if mx else 0.0,
-            })
-        st.markdown("#### Preview (baseline, current data — current score ÷ max)")
+        preview = [{"Question": question_excel_name(q, "english"), "Max score": float(new_max[q])} for q in count_qs]
+        st.markdown("#### Preview")
         st.dataframe(pd.DataFrame(preview), hide_index=True, use_container_width=True)
 
     c1, c2 = st.columns(2)
@@ -2489,3 +2478,5 @@ elif st.session_state.step == 10:
 
     if st.button("Back"):
         go_back()
+
+st.session_state["_last_step"] = st.session_state.step
