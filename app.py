@@ -255,6 +255,7 @@ def init_state():
         "pairing_summary": {},
         "item_mapping": dict(ITEM_MAPPING),
         "domain_mapping": {k: list(v) for k, v in DOMAIN_MAPPING.items()},
+        "qa_ready": False,
         "value_recode_mapping": {},
         "actions": {},
         "selected_delete_indices": set(),
@@ -945,7 +946,7 @@ def go_back():
 
 
 def show_progress():
-    labels = ["1. Upload", "2. Map Columns", "3. Pair Pre/Post", "4. Score Text", "5. Review Rows", "6. Question Actions", "7. Questions→Items", "8. Items→Domains", "9. Download"]
+    labels = ["1. Upload", "2. Map Columns", "3. Pair Pre/Post", "4. Questions→Items", "5. Items→Domains", "6. Review Rows", "7. Score Text", "8. Question Actions", "9. Download"]
     current = st.session_state.step
     st.progress((current - 1) / (len(labels) - 1))
     st.write(" → ".join([f"**{x}**" if i + 1 == current else x for i, x in enumerate(labels)]))
@@ -1321,7 +1322,7 @@ elif st.session_state.step == 2:
         uploaded_cols = list(raw_df.columns)
         st.write("Map the uploaded columns into the standard IDELA format.")
         show_idela_date_filter_summary(st.session_state.get("idela_date_filter_summary", {}))
-        tab_meta, tab_q, tab_preview = st.tabs(["Essential info columns", "Required question columns", "Preview"])
+        tab_meta, tab_q = st.tabs(["Essential info columns", "Required question columns"])
         with tab_meta:
             st.warning("Map these essential info columns. Any other uploaded columns will be discarded.")
             st.info(f"IDELA_date is already mapped to `{mapping.get('IDELA_date', '')}` from Step 1.")
@@ -1336,12 +1337,6 @@ elif st.session_state.step == 2:
                 with c2:
                     post_col = f"{base_col}_post"
                     selectbox_mapping(question_mapping_label(post_col), post_col, uploaded_cols, post_col, mapping, endline_hint=True)
-        with tab_preview:
-            st.dataframe(raw_df.head(20), use_container_width=True)
-
-        if mapping.get("caseid"):
-            st.markdown("#### Analysis count summary")
-            show_same_row_count_summary(raw_df, mapping.get("caseid"))
 
         required_keys = META_COLUMNS + BASELINE_QUESTION_COLS + ENDLINE_QUESTION_COLS
 
@@ -1382,10 +1377,6 @@ elif st.session_state.step == 2:
             for base_col in BASELINE_QUESTION_COLS:
                 selectbox_mapping(question_mapping_label(f"{base_col}_post"), base_col, end_cols, f"end_{base_col}", mapping, endline_hint=True)
 
-        if mapping.get("base_id") and mapping.get("end_id"):
-            st.markdown("#### Analysis count summary")
-            show_two_file_count_summary(base_df, end_df, mapping.get("base_id"), mapping.get("end_id"))
-
         required_keys = ["base_id", "end_id", "base_IDELA_date"] + [f"base_{c}" for c in META_COLUMNS if c not in ["caseid", "IDELA_date"]] + [f"base_{c}" for c in BASELINE_QUESTION_COLS] + [f"end_{c}" for c in BASELINE_QUESTION_COLS]
         if st.button("Next: Pair pre/post", type="primary"):
             missing = [k for k in required_keys if not mapping.get(k)]
@@ -1415,7 +1406,7 @@ elif st.session_state.step == 2:
         uploaded_cols = list(raw_df.columns)
         st.write("Map the ID column, round column, then select which round value means baseline and endline.")
         show_idela_date_filter_summary(st.session_state.get("idela_date_filter_summary", {}))
-        tab_setup, tab_meta, tab_q, tab_preview = st.tabs(["ID and round", "Essential info columns", "Question columns", "Preview"])
+        tab_setup, tab_meta, tab_q = st.tabs(["ID and round", "Essential info columns", "Question columns"])
         with tab_setup:
             selectbox_mapping("Unique child/beneficiary ID", "caseid", uploaded_cols, "dup_id", mapping)
             selectbox_mapping("Round/status column that says baseline/endline", "round", uploaded_cols, "round_col", mapping)
@@ -1435,12 +1426,6 @@ elif st.session_state.step == 2:
             st.info(f"IDELA_date is already mapped to `{mapping.get('meta_IDELA_date', '')}` from Step 1.")
             for col in [c for c in META_COLUMNS if c not in ["caseid", "IDELA_date"]]:
                 selectbox_mapping(col, col, uploaded_cols, f"meta_{col}", mapping)
-        with tab_preview:
-            st.dataframe(raw_df.head(20), use_container_width=True)
-
-        if mapping.get("dup_id") and mapping.get("round_col") and baseline_value and endline_value:
-            st.markdown("#### Analysis count summary")
-            show_duplicated_rows_count_summary(raw_df, mapping.get("dup_id"), mapping.get("round_col"), baseline_value, endline_value)
 
         required_keys = ["dup_id", "round_col", "meta_IDELA_date"] + [f"meta_{c}" for c in META_COLUMNS if c not in ["caseid", "IDELA_date"]] + [f"q_{c}" for c in BASELINE_QUESTION_COLS]
         if st.button("Next: Pair pre/post", type="primary"):
@@ -1543,7 +1528,7 @@ elif st.session_state.step == 3:
         if st.button("Back"):
             go_back()
     with c2:
-        if kept > 0 and st.button("Next: Score text values", type="primary"):
+        if kept > 0 and st.button("Next: Map questions into items", type="primary"):
             # Re-scoring / re-review must start fresh from the newly paired set.
             st.session_state.scored_df = None
             st.session_state.filtered_df = None
@@ -1552,32 +1537,41 @@ elif st.session_state.step == 3:
             st.session_state.actions = {}
             go_next()
 
-# STEP 4: Score/recode text values
-elif st.session_state.step == 4:
-    st.subheader("Step 4: Score text values in question fields")
-    mapped_df = (st.session_state.paired_df.copy() if st.session_state.get("paired_df") is not None
-                 else st.session_state.mapped_df.copy())
-    all_question_cols = [c for c in BASELINE_QUESTION_COLS + ENDLINE_QUESTION_COLS if c in mapped_df.columns]
+# STEP 7: Score/recode text values
+elif st.session_state.step == 7:
+    st.subheader("Step 7: Score text values in question fields")
+    base_df = (st.session_state.clean_base.copy() if st.session_state.get("clean_base") is not None
+               else (st.session_state.paired_df.copy() if st.session_state.get("paired_df") is not None
+                     else st.session_state.mapped_df.copy()))
+    all_question_cols = [c for c in BASELINE_QUESTION_COLS + ENDLINE_QUESTION_COLS if c in base_df.columns]
 
-    # Backend rule: before scoring answers, replace any null/blank value in question columns with ---
-    mapped_df = replace_question_nulls_with_dash(mapped_df, all_question_cols)
-    st.session_state.mapped_df = mapped_df.copy()
+    # Before scoring answers, replace any null/blank value in question columns with ---
+    base_df = replace_question_nulls_with_dash(base_df, all_question_cols)
+    st.session_state.clean_base = base_df.copy()
 
-    unscored_df = detect_unscored_values(mapped_df, all_question_cols)
+    unscored_df = detect_unscored_values(base_df, all_question_cols)
+
+    def _finalize_scoring(df_scored):
+        # Convert scored values to numbers so downstream missing/action logic is consistent.
+        final = normalize_score_values(df_scored, all_question_cols)
+        st.session_state.scored_df = final
+        st.session_state.clean_base = final
+        st.session_state.actions = {}
+        st.session_state.actions_confirmed = False
+        st.session_state.qa_ready = False
 
     if unscored_df.empty:
         st.success("All question fields are already numeric, or contain only recognized missing values.")
-        st.session_state.scored_df = mapped_df
         c1, c2 = st.columns(2)
         with c1:
             if st.button("Back"):
                 go_back()
         with c2:
-            if st.button("Next: Review rows", type="primary"):
+            if st.button("Next: Question actions", type="primary"):
+                _finalize_scoring(base_df)
                 go_next()
     else:
         st.warning("Some question values are text/not scored. Choose the numeric score for each uploaded value.")
-        st.caption("This page is now using direct input boxes instead of a table editor, so every value can be changed reliably.")
 
         unique_values = (
             unscored_df.groupby("Uploaded value", as_index=False)
@@ -1614,7 +1608,6 @@ elif st.session_state.step == 4:
                     key=f"score_value_{i}_{normalize_name(uploaded_value)[:30]}",
                     label_visibility="collapsed",
                 )
-                # Store as int when possible
                 recode_mapping[uploaded_value] = int(score) if float(score).is_integer() else score
             with c3:
                 st.write(int(row["Total rows"]))
@@ -1628,45 +1621,36 @@ elif st.session_state.step == 4:
         with c2:
             if st.button("Apply scores and continue", type="primary"):
                 st.session_state.value_recode_mapping = recode_mapping
-                scored_df = apply_value_recode(mapped_df, all_question_cols, recode_mapping)
+                scored_df = apply_value_recode(base_df, all_question_cols, recode_mapping)
                 remaining_unscored = detect_unscored_values(scored_df, all_question_cols)
                 if len(remaining_unscored) > 0:
                     st.error("Some text values are still not scored. Please review the list again.")
                     st.dataframe(remaining_unscored, use_container_width=True)
                 else:
-                    st.session_state.scored_df = scored_df
-                    # Important: reset row deletions and question actions whenever scoring is re-applied.
-                    # Otherwise old selections from a previous run can leave only a few rows in Step 5,
-                    # which makes missing percentages look like 33.3% / 66.7% incorrectly.
-                    st.session_state.selected_delete_indices = set()
-                    st.session_state.filtered_df = None
-                    st.session_state.clean_base = None
-                    st.session_state.actions = {}
-                    st.session_state.actions_confirmed = False
+                    _finalize_scoring(scored_df)
                     go_next()
 
-# STEP 5: Row review
-elif st.session_state.step == 5:
-    st.subheader("Step 4: Review rows with high missing percentage")
-    mapped_df = (st.session_state.scored_df.copy() if st.session_state.scored_df is not None
-                 else (st.session_state.paired_df.copy() if st.session_state.get("paired_df") is not None
-                       else st.session_state.mapped_df.copy()))
+# STEP 6: Row review
+elif st.session_state.step == 6:
+    st.subheader("Step 6: Review rows with high missing percentage")
+    mapped_df = (st.session_state.paired_df.copy() if st.session_state.get("paired_df") is not None
+                 else st.session_state.mapped_df.copy())
 
     if "IDELA_date" not in mapped_df.columns:
         st.error("IDELA_date is missing. Go back and map it.")
         st.stop()
 
     mapped_df["IDELA_date_parsed"] = pd.to_datetime(mapped_df["IDELA_date"], errors="coerce")
+    # Keep the original answer values (text intact) so Step 7 scoring still works.
     filtered_df = mapped_df[mapped_df["IDELA_date_parsed"].notna()].drop(columns=["IDELA_date_parsed"]).copy()
-    all_question_cols = [c for c in BASELINE_QUESTION_COLS + ENDLINE_QUESTION_COLS if c in filtered_df.columns]
-    filtered_df = normalize_score_values(filtered_df, all_question_cols)
 
     filtered_df.insert(0, "Delete Action", "")
     filtered_df.insert(1, "baseline missing %", missing_pct(filtered_df, BASELINE_QUESTION_COLS))
     filtered_df.insert(2, "endline missing %", missing_pct(filtered_df, ENDLINE_QUESTION_COLS))
     st.session_state.filtered_df = filtered_df
 
-    st.write(f"Rows after merge and IDELA_date validation: **{len(filtered_df)}**")
+    st.caption("Note: text answers are scored in the next step, so a value like 'no_response' is not yet counted as missing here.")
+    st.write(f"Rows after pairing and IDELA_date validation: **{len(filtered_df)}**")
     high_missing = filtered_df[(filtered_df["baseline missing %"] > 0.30) | (filtered_df["endline missing %"] > 0.30)].copy()
     st.warning(f"Rows with baseline or endline missing above 30%: {len(high_missing)}")
 
@@ -1733,20 +1717,21 @@ elif st.session_state.step == 5:
         if st.button("Back"):
             go_back()
     with c2:
-        if st.button("Next: Question actions", type="primary"):
-            # Recalculate default question actions fresh from the final row set.
-            # This prevents previous/default choices from staying when the data changes.
+        if st.button("Next: Score text values", type="primary"):
+            st.session_state.scored_df = None
             st.session_state.actions = {}
             st.session_state.actions_confirmed = False
+            st.session_state.qa_ready = False
             go_next()
 
-# STEP 6: Question actions
-elif st.session_state.step == 6:
-    st.subheader("Step 5: Question Missing Review and Actions")
+# STEP 8: Question actions
+elif st.session_state.step == 8:
+    st.subheader("Step 8: Question Missing Review and Actions")
     clean_base = st.session_state.clean_base.copy()
-    st.info(f"Question missing percentages are calculated using **{len(clean_base)} cleaned rows** after Step 4 row deletion.")
+    st.info(f"Question missing percentages are calculated using **{len(clean_base)} cleaned rows**.")
 
     action_options = ["change missing to 0", "drop this question"]
+    valid_actions = set(action_options)
 
     question_review_rows = []
     for base_col in BASELINE_QUESTION_COLS:
@@ -1755,12 +1740,11 @@ elif st.session_state.step == 6:
         arabic_name, english_name = question_name.split(" | ", 1) if " | " in question_name else ("", question_name)
         base_missing = question_missing_pct(clean_base, base_col)
         end_missing = question_missing_pct(clean_base, post_col)
-        default_action = "drop this question" if (base_missing >= 0.30 or end_missing >= 0.30) else "change missing to 0"
-
-        # Auto-fill default once, then keep any user edits.
-        if base_col not in st.session_state.actions:
-            st.session_state.actions[base_col] = default_action
-
+        high = base_missing >= 0.30 or end_missing >= 0.30
+        default_action = "drop this question" if high else "change missing to 0"
+        current = st.session_state.actions.get(base_col, default_action)
+        if current not in valid_actions:
+            current = default_action
         question_review_rows.append({
             "Baseline ID": base_col,
             "Endline ID": post_col,
@@ -1768,112 +1752,84 @@ elif st.session_state.step == 6:
             "English": english_name,
             "% Missing Baseline": base_missing * 100,
             "% Missing Endline": end_missing * 100,
-            "High Missing": "YES" if (base_missing >= 0.30 or end_missing >= 0.30) else "",
-            "Action": st.session_state.actions.get(base_col, default_action),
+            "High Missing": "YES" if high else "",
+            "Action": current,
         })
-
     question_review_df = pd.DataFrame(question_review_rows)
 
-    # Enforce valid default action for EVERY question. This prevents blank action cells.
-    high_missing_questions = question_review_df.loc[question_review_df["High Missing"].eq("YES"), "Baseline ID"].tolist()
-    valid_actions = set(action_options)
+    st.warning("Questions with baseline or endline missing ≥ 30% are flagged 'High Missing' and default to 'drop this question'. "
+               "Change any Action, then press **Apply actions** — all edits are saved together on Apply, so there is no per-row delay.")
 
-    for _, r in question_review_df.iterrows():
-        q = r["Baseline ID"]
-        default_action = "drop this question" if r["High Missing"] == "YES" else "change missing to 0"
-        current_action = st.session_state.actions.get(q)
-        if current_action not in valid_actions:
-            st.session_state.actions[q] = default_action
+    # A form batches every edit and only reruns the app when you press a submit button.
+    # This removes the previous lag where a change registered only after clicking another row.
+    with st.form("question_actions_form", clear_on_submit=False):
+        edited_actions = st.data_editor(
+            question_review_df,
+            column_config={
+                "Baseline ID": st.column_config.TextColumn("Baseline ID", disabled=True),
+                "Endline ID": st.column_config.TextColumn("Endline ID", disabled=True),
+                "Arabic": st.column_config.TextColumn("Arabic", disabled=True),
+                "English": st.column_config.TextColumn("English", disabled=True),
+                "% Missing Baseline": st.column_config.ProgressColumn("% Missing Baseline", format="%.1f%%", min_value=0, max_value=100),
+                "% Missing Endline": st.column_config.ProgressColumn("% Missing Endline", format="%.1f%%", min_value=0, max_value=100),
+                "High Missing": st.column_config.TextColumn("High Missing", disabled=True),
+                "Action": st.column_config.SelectboxColumn("Action", options=action_options, required=True),
+            },
+            disabled=["Baseline ID", "Endline ID", "Arabic", "English", "% Missing Baseline", "% Missing Endline", "High Missing"],
+            hide_index=True,
+            use_container_width=True,
+            height=520,
+            key="question_action_editor_form",
+        )
+        fc1, fc2 = st.columns(2)
+        with fc1:
+            set_all_zero = st.form_submit_button("Set all to 'change missing to 0'")
+        with fc2:
+            submitted = st.form_submit_button("Apply actions", type="primary")
 
-    # Force high-missing questions to default to drop the first time they appear.
-    # The user can still change them manually after this.
-    if "high_missing_default_applied" not in st.session_state:
-        st.session_state.high_missing_default_applied = True
-        for q in high_missing_questions:
-            st.session_state.actions[q] = "drop this question"
+    if set_all_zero:
+        st.session_state.actions = {r["Baseline ID"]: "change missing to 0" for _, r in question_review_df.iterrows()}
+        st.session_state.qa_ready = True
+        st.rerun()
 
-    question_review_df["Action"] = question_review_df["Baseline ID"].map(st.session_state.actions)
-    question_review_df["Action"] = question_review_df.apply(
-        lambda r: r["Action"] if r["Action"] in valid_actions else ("drop this question" if r["High Missing"] == "YES" else "change missing to 0"),
-        axis=1
-    )
+    if submitted:
+        ea = edited_actions.copy()
+        ea["Action"] = ea.apply(
+            lambda r: r["Action"] if r["Action"] in valid_actions else ("drop this question" if r["High Missing"] == "YES" else "change missing to 0"),
+            axis=1,
+        )
+        st.session_state.actions = dict(zip(ea["Baseline ID"], ea["Action"]))
+        st.session_state.qa_ready = True
+        st.rerun()
 
-    def highlight_high_missing(row):
-        if row["High Missing"] == "YES":
-            return ["background-color: #ffe5e5; color: #9f1239; font-weight: 600"] * len(row)
-        return [""] * len(row)
-
-    st.warning("Questions with baseline or endline missing percentage ≥ 30% are highlighted and defaulted to 'drop this question'.")
-
-    edited_actions = st.data_editor(
-        question_review_df.style.apply(highlight_high_missing, axis=1),
-        column_config={
-            "Baseline ID": st.column_config.TextColumn("Baseline ID", disabled=True),
-            "Endline ID": st.column_config.TextColumn("Endline ID", disabled=True),
-            "Arabic": st.column_config.TextColumn("Arabic", disabled=True),
-            "English": st.column_config.TextColumn("English", disabled=True),
-            "% Missing Baseline": st.column_config.ProgressColumn("% Missing Baseline", format="%.1f%%", min_value=0, max_value=100),
-            "% Missing Endline": st.column_config.ProgressColumn("% Missing Endline", format="%.1f%%", min_value=0, max_value=100),
-            "High Missing": st.column_config.TextColumn("High Missing", disabled=True),
-            "Action": st.column_config.SelectboxColumn("Action", options=action_options, required=True),
-        },
-        disabled=["Baseline ID", "Endline ID", "Arabic", "English", "% Missing Baseline", "% Missing Endline", "High Missing"],
-        hide_index=True,
-        use_container_width=True,
-        key="question_action_editor_v2",
-    )
-
-    # Save edited actions, filling any blank/invalid cells with the correct default.
-    edited_actions["Action"] = edited_actions.apply(
-        lambda r: r["Action"] if r["Action"] in valid_actions else ("drop this question" if r["High Missing"] == "YES" else "change missing to 0"),
-        axis=1
-    )
-    st.session_state.actions = dict(zip(edited_actions["Baseline ID"], edited_actions["Action"]))
-
-    dropped_questions = edited_actions.loc[edited_actions["Action"].eq("drop this question"), ["Baseline ID", "Endline ID", "English", "Arabic"]].copy()
-    st.info("Only two actions are available: change missing to 0 or drop this question.")
-
-    def confirm_and_continue():
-        st.session_state.confirm_drop_questions = True
-        go_next()
-
-    if hasattr(st, "dialog"):
-        @st.dialog("Confirm dropped questions")
-        def show_drop_confirmation():
-            if len(dropped_questions) == 0:
-                st.success("No questions will be dropped.")
-            else:
-                st.warning(f"The following {len(dropped_questions)} question(s) will be dropped from baseline and endline:")
-                st.dataframe(dropped_questions, hide_index=True, use_container_width=True)
-            if st.button("Confirm and continue", type="primary"):
-                confirm_and_continue()
-    else:
-        show_drop_confirmation = None
-
-    c1, c2 = st.columns(2)
-    with c1:
-        if st.button("Back"):
-            go_back()
-    with c2:
-        if st.button("Finish actions", type="primary"):
-            if hasattr(st, "dialog"):
-                show_drop_confirmation()
-            else:
-                st.session_state.show_drop_confirmation_inline = True
-
-    if st.session_state.get("show_drop_confirmation_inline", False):
-        st.warning("Confirm dropped questions before continuing.")
-        if len(dropped_questions) == 0:
-            st.success("No questions will be dropped.")
+    if st.session_state.get("qa_ready"):
+        dropped = [q for q, a in st.session_state.actions.items() if a == "drop this question"]
+        if dropped:
+            st.warning(f"{len(dropped)} question(s) will be dropped from baseline and endline.")
+            drop_df = pd.DataFrame({
+                "Baseline ID": dropped,
+                "English": [QUESTION_LABELS.get(q, q).split(" | ", 1)[-1] for q in dropped],
+            })
+            st.dataframe(drop_df, hide_index=True, use_container_width=True)
         else:
-            st.dataframe(dropped_questions, hide_index=True, use_container_width=True)
-        if st.button("Confirm and continue", type="primary"):
-            st.session_state.show_drop_confirmation_inline = False
-            confirm_and_continue()
+            st.success("No questions will be dropped.")
+        cc1, cc2 = st.columns(2)
+        with cc1:
+            if st.button("Back to editing"):
+                st.session_state.qa_ready = False
+                st.rerun()
+        with cc2:
+            if st.button("Confirm and continue to download", type="primary"):
+                st.session_state.qa_ready = False
+                go_next()
 
-# STEP 7: Map questions into items (drag and drop)
-elif st.session_state.step == 7:
-    st.subheader("Step 7: Map questions into items")
+    st.divider()
+    if st.button("Back"):
+        go_back()
+
+# STEP 4: Map questions into items (drag and drop)
+elif st.session_state.step == 4:
+    st.subheader("Step 4: Map questions into items")
     st.write("Drag each question card into the correct item box. Defaults follow the standard IDELA structure — adjust if needed.")
 
     ordered_items = [f"ITEM_{i}" for i in range(1, 22)]
@@ -1946,9 +1902,9 @@ elif st.session_state.step == 7:
         if st.button("Next: Map items into domains", type="primary"):
             go_next()
 
-# STEP 8: Map items into domains (drag and drop)
-elif st.session_state.step == 8:
-    st.subheader("Step 8: Map items into domains")
+# STEP 5: Map items into domains (drag and drop)
+elif st.session_state.step == 5:
+    st.subheader("Step 5: Map items into domains")
     st.write("Drag each item card into the correct domain box. Defaults follow the standard IDELA domains — adjust if needed.")
 
     ordered_items = [f"ITEM_{i}" for i in range(1, 22)]
@@ -2013,12 +1969,12 @@ elif st.session_state.step == 8:
         if st.button("Back"):
             go_back()
     with c2:
-        if st.button("Next: Preview and download", type="primary"):
+        if st.button("Next: Review rows", type="primary"):
             go_next()
 
 # STEP 9: Download
 elif st.session_state.step == 9:
-    st.subheader("Step 6: Preview and Download")
+    st.subheader("Step 9: Preview and Download")
     clean_base = st.session_state.clean_base.copy()
     filtered_df = st.session_state.filtered_df.copy()
     actions = st.session_state.actions
