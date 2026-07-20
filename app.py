@@ -1803,44 +1803,80 @@ def build_duplicated_rows_df(raw_df: pd.DataFrame, mapping: Dict[str, str], base
     return keep_standard_columns(merged)
 
 
-def save_checkpoint_bytes(resume_step):
-    """A real .xlsx: one visible sheet with each row's missing %, plus hidden sheets
-    carrying the full state so a 'Continue' mode can resume at exactly resume_step."""
+def save_checkpoint_bytes():
+    """Full snapshot of the current session as a real .xlsx: one visible sheet with the missing %
+    relevant to where you paused, plus hidden sheets carrying the complete state so a 'Continue'
+    run resumes at exactly this point with all work (deletions, actions) intact."""
     import json
     ss = st.session_state
-    src = ss.get("scored_df")
-    if src is None:
+    pre_mode = ss.get("analysis_mode") == "pre"
+    step = int(ss.get("step", 8))
+
+    if step >= 9 and ss.get("clean_base") is not None:
+        cb = ss["clean_base"]
+        rows = []
+        for base_col in BASELINE_QUESTION_COLS:
+            if base_col not in cb.columns:
+                continue
+            lab = QUESTION_LABELS.get(base_col, base_col)
+            eng = lab.split(" | ", 1)[1].strip() if " | " in lab else str(lab)
+            row = {"Question ID": base_col, "Question": eng,
+                   "missing % (pre)": round(question_missing_pct(cb, base_col) * 100, 1)}
+            if not pre_mode:
+                row["missing % (post)"] = round(question_missing_pct(cb, f"{base_col}_post") * 100, 1)
+            rows.append(row)
+        visible = pd.DataFrame(rows) if rows else pd.DataFrame({"info": ["No questions"]})
+        vis_name = "Missing % per question"
+    else:
         src = ss.get("clean_base")
-    if src is None:
-        src = ss.get("paired_df")
-    if src is None:
-        src = ss.get("mapped_df")
-    miss = pd.DataFrame({"info": ["No data available"]})
-    if src is not None:
-        keep = [c for c in ["caseid", "d_childs_full_name", "child_name", "student_name",
-                            "e_childs_sex", "f_childs_age", "teacher_location"] if c in src.columns]
-        miss = src[keep].copy() if keep else pd.DataFrame(index=range(len(src)))
-        miss["missing % (pre)"] = (missing_pct(src, BASELINE_QUESTION_COLS) * 100).round(1).values
-        if any(c in src.columns for c in ENDLINE_QUESTION_COLS):
-            miss["missing % (post)"] = (missing_pct(src, ENDLINE_QUESTION_COLS) * 100).round(1).values
+        if src is None:
+            src = ss.get("scored_df")
+        if src is None:
+            src = ss.get("paired_df")
+        if src is None:
+            src = ss.get("mapped_df")
+        if src is None:
+            visible = pd.DataFrame({"info": ["No data available"]})
+        else:
+            keep = [c for c in ["caseid", "d_childs_full_name", "child_name", "student_name",
+                                "e_childs_sex", "f_childs_age", "teacher_location"] if c in src.columns]
+            visible = src[keep].copy() if keep else pd.DataFrame(index=range(len(src)))
+            visible["missing % (pre)"] = (missing_pct(src, BASELINE_QUESTION_COLS) * 100).round(1).values
+            if not pre_mode and any(c in src.columns for c in ENDLINE_QUESTION_COLS):
+                visible["missing % (post)"] = (missing_pct(src, ENDLINE_QUESTION_COLS) * 100).round(1).values
+        vis_name = "Missing % per row"
+
+    sdi = []
+    for i in (ss.get("selected_delete_indices") or set()):
+        try:
+            sdi.append(int(i))
+        except Exception:
+            sdi.append(str(i))
+    state = {
+        "step": step,
+        "analysis_mode": ss.get("analysis_mode"),
+        "item_mapping": ss.get("item_mapping") or {},
+        "domain_mapping": ss.get("domain_mapping") or {},
+        "max_scores": ss.get("max_scores") or {},
+        "actions": ss.get("actions") or {},
+        "value_recode_mapping": ss.get("value_recode_mapping") or {},
+        "selected_delete_indices": sdi,
+        "rows_applied": bool(ss.get("rows_applied")),
+        "qa_ready": bool(ss.get("qa_ready")),
+        "qi_applied": bool(ss.get("qi_applied", True)),
+        "di_applied": bool(ss.get("di_applied", True)),
+    }
+
     out = io.BytesIO()
     with pd.ExcelWriter(out, engine="xlsxwriter") as writer:
-        miss.to_excel(writer, sheet_name="Missing % per row", index=False)
-        meta = {
-            "resume_step": int(resume_step),
-            "analysis_mode": ss.get("analysis_mode"),
-            "item_mapping": ss.get("item_mapping") or {},
-            "domain_mapping": ss.get("domain_mapping") or {},
-            "max_scores": ss.get("max_scores") or {},
-            "actions": ss.get("actions") or {},
-        }
-        pd.DataFrame({"json": [json.dumps(meta)]}).to_excel(writer, sheet_name="_meta", index=False)
-        writer.sheets["_meta"].hide()
-        for key in ["scored_df", "clean_base", "filtered_df", "download_raw_df", "paired_df", "mapped_df"]:
+        visible.to_excel(writer, sheet_name=vis_name[:31], index=False)
+        pd.DataFrame({"json": [json.dumps(state)]}).to_excel(writer, sheet_name="_state", index=False)
+        writer.sheets["_state"].hide()
+        for key in ["mapped_df", "paired_df", "scored_df", "filtered_df", "clean_base", "download_raw_df"]:
             dfk = ss.get(key)
             if dfk is not None and hasattr(dfk, "to_excel"):
-                sh = ("_" + key)[:31]
-                dfk.to_excel(writer, sheet_name=sh, index=False)
+                sh = f"_df_{key}"[:31]
+                dfk.to_excel(writer, sheet_name=sh, index=True)
                 writer.sheets[sh].hide()
     return out.getvalue()
 
@@ -1849,23 +1885,27 @@ def load_checkpoint(file):
     import json
     ss = st.session_state
     xls = pd.ExcelFile(file)
-    if "_meta" not in xls.sheet_names:
+    if "_state" not in xls.sheet_names:
         raise ValueError("This file is not an IDELA check-later file.")
-    meta = json.loads(pd.read_excel(xls, "_meta")["json"].iloc[0])
-    ss["analysis_mode"] = meta.get("analysis_mode")
-    ss["item_mapping"] = {str(k): v for k, v in (meta.get("item_mapping") or {}).items()}
-    ss["domain_mapping"] = {k: list(v) for k, v in (meta.get("domain_mapping") or {}).items()}
-    ss["max_scores"] = {str(k): float(v) for k, v in (meta.get("max_scores") or {}).items()}
-    ss["actions"] = dict(meta.get("actions") or {})
-    for key in ["scored_df", "clean_base", "filtered_df", "download_raw_df", "paired_df", "mapped_df"]:
-        sh = ("_" + key)[:31]
+    state = json.loads(pd.read_excel(xls, "_state")["json"].iloc[0])
+    ss["analysis_mode"] = state.get("analysis_mode")
+    ss["item_mapping"] = {str(k): v for k, v in (state.get("item_mapping") or {}).items()}
+    ss["domain_mapping"] = {k: list(v) for k, v in (state.get("domain_mapping") or {}).items()}
+    ss["max_scores"] = {str(k): float(v) for k, v in (state.get("max_scores") or {}).items()}
+    ss["actions"] = dict(state.get("actions") or {})
+    ss["value_recode_mapping"] = dict(state.get("value_recode_mapping") or {})
+    for key in ["mapped_df", "paired_df", "scored_df", "filtered_df", "clean_base", "download_raw_df"]:
+        sh = f"_df_{key}"[:31]
         if sh in xls.sheet_names:
-            ss[key] = pd.read_excel(xls, sh)
-    ss["step"] = int(meta.get("resume_step", 8))
-    ss["rows_applied"] = False
-    ss["qa_ready"] = False
-    ss["_last_step"] = None
-    ss["selected_delete_indices"] = set()
+            ss[key] = pd.read_excel(xls, sh, index_col=0)
+    ss["selected_delete_indices"] = set(state.get("selected_delete_indices") or [])
+    ss["rows_applied"] = bool(state.get("rows_applied"))
+    ss["qa_ready"] = bool(state.get("qa_ready"))
+    ss["qi_applied"] = bool(state.get("qi_applied", True))
+    ss["di_applied"] = bool(state.get("di_applied", True))
+    step = int(state.get("step", 8))
+    ss["step"] = step
+    ss["_last_step"] = step  # keep restored flags; block the fresh-arrival reset
 
 
 init_state()
@@ -1907,16 +1947,32 @@ render_sidebar()
 show_progress()
 st.divider()
 
+def structure_code(label):
+    l = str(label).lower()
+    if "two file" in l:
+        return "two_file"
+    if "duplicat" in l:
+        return "dup"
+    return "same_row"
+
+
 # STEP 1: Upload structure, files, and IDELA date filter
 if st.session_state.step == 1:
     st.subheader("Step 1: Select upload structure")
-    upload_type = st.radio(
-        "How is your IDELA data uploaded?",
-        [
+    if st.session_state.get("analysis_mode") == "pre":
+        _structure_options = [
+            "One file: each child's pre data is in the same row",
+            "One file: pre data in duplicated rows",
+        ]
+    else:
+        _structure_options = [
             "One file: baseline and endline are in the same row",
             "Two files: one baseline file and one endline file",
             "One file: baseline and endline are duplicated rows",
-        ],
+        ]
+    upload_type = st.radio(
+        "How is your IDELA data uploaded?",
+        _structure_options,
         index=0,
         key="upload_type_radio",
     )
@@ -1926,7 +1982,7 @@ if st.session_state.step == 1:
 
     mapping = dict(st.session_state.column_mapping) if st.session_state.column_mapping else {}
 
-    if upload_type.startswith("One file: baseline and endline are in the same row"):
+    if structure_code(upload_type) == "same_row":
         uploaded_file = st.file_uploader("Upload Excel file", type=["xlsx", "xlsm", "xls"], key="same_file")
         if uploaded_file:
             xl = pd.ExcelFile(uploaded_file)
@@ -1942,7 +1998,7 @@ if st.session_state.step == 1:
             if st.button("Next: Map columns", type="primary"):
                 go_next()
 
-    elif upload_type.startswith("Two files"):
+    elif structure_code(upload_type) == "two_file":
         col1, col2 = st.columns(2)
         with col1:
             base_file = st.file_uploader("Upload baseline Excel file", type=["xlsx", "xlsm", "xls"], key="base_file")
@@ -1994,7 +2050,7 @@ elif st.session_state.step == 2:
     upload_type = st.session_state.upload_type
     mapping = dict(st.session_state.column_mapping) if st.session_state.column_mapping else {}
 
-    if upload_type.startswith("One file: baseline and endline are in the same row"):
+    if structure_code(upload_type) == "same_row":
         raw_df = st.session_state.raw_df
         uploaded_cols = list(raw_df.columns)
         st.write("Map the uploaded columns into the standard IDELA format.")
@@ -2004,14 +2060,19 @@ elif st.session_state.step == 2:
             for col in [c for c in META_COLUMNS if c != "IDELA_date"]:
                 selectbox_mapping(col, col, uploaded_cols, col, mapping)
         with tab_q:
-            st.warning("Map all baseline question columns and all endline/post question columns.")
-            for base_col in BASELINE_QUESTION_COLS:
-                c1, c2 = st.columns(2)
-                with c1:
+            if st.session_state.get("analysis_mode") == "pre":
+                st.warning("Map all pre (baseline) question columns.")
+                for base_col in BASELINE_QUESTION_COLS:
                     selectbox_mapping(question_mapping_label(base_col), base_col, uploaded_cols, base_col, mapping)
-                with c2:
-                    post_col = f"{base_col}_post"
-                    selectbox_mapping(question_mapping_label(post_col), post_col, uploaded_cols, post_col, mapping, endline_hint=True)
+            else:
+                st.warning("Map all baseline question columns and all endline/post question columns.")
+                for base_col in BASELINE_QUESTION_COLS:
+                    c1, c2 = st.columns(2)
+                    with c1:
+                        selectbox_mapping(question_mapping_label(base_col), base_col, uploaded_cols, base_col, mapping)
+                    with c2:
+                        post_col = f"{base_col}_post"
+                        selectbox_mapping(question_mapping_label(post_col), post_col, uploaded_cols, post_col, mapping, endline_hint=True)
 
         if st.session_state.get("analysis_mode") == "pre":
             required_keys = META_COLUMNS + BASELINE_QUESTION_COLS
@@ -2032,7 +2093,7 @@ elif st.session_state.step == 2:
                 st.session_state.selected_delete_indices = set()
                 go_next()
 
-    elif upload_type.startswith("Two files"):
+    elif structure_code(upload_type) == "two_file":
         base_df = st.session_state.base_df
         end_df = st.session_state.end_df
         base_cols = list(base_df.columns)
@@ -2146,6 +2207,8 @@ elif st.session_state.step == 3:
     if source_df is None or len(source_df) == 0:
         st.error("No mapped data found. Go back to Step 2 and map your columns.")
         st.stop()
+    if pre_mode:
+        source_df = source_df.drop(columns=[c for c in ENDLINE_QUESTION_COLS if c in source_df.columns], errors="ignore")
 
     base_cols = [c for c in BASELINE_QUESTION_COLS if c in source_df.columns]
     end_cols = [c for c in ENDLINE_QUESTION_COLS if c in source_df.columns]
@@ -2321,34 +2384,35 @@ elif st.session_state.step == 4:
 
 # STEP 8: Row review
 elif st.session_state.step == 8:
+    pre_mode = st.session_state.get("analysis_mode") == "pre"
     st.subheader("Step 8: Review rows with high missing percentage")
-    _dec8 = st.radio(
-        "Delete rows now, or check with the field first and continue later?",
-        ["Delete rows now", "Decide later — save a check-later file"],
-        key="decide_step8", horizontal=True)
-    if _dec8.startswith("Decide later"):
-        st.info("This file shows each row's missing %. Share it with the field team; when you're ready, reopen "
-                "the app, pick the matching **Continue** mode, and upload this file to resume right here.")
-        st.download_button("Download check-later file", data=save_checkpoint_bytes(8),
-                           file_name="idela_checklater_review.xlsx",
-                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                           type="primary")
-        if st.button("Back"):
-            go_back()
-        st.stop()
     if st.session_state.get("_last_step") != 8:
         st.session_state.rows_applied = False
-    mapped_df = (st.session_state.scored_df.copy() if st.session_state.get("scored_df") is not None
-                 else (st.session_state.paired_df.copy() if st.session_state.get("paired_df") is not None
-                       else st.session_state.mapped_df.copy()))
-    filtered_df = mapped_df.copy()
-    filtered_df.insert(0, "baseline missing %", missing_pct(filtered_df, BASELINE_QUESTION_COLS))
-    filtered_df.insert(1, "endline missing %", missing_pct(filtered_df, ENDLINE_QUESTION_COLS))
-    st.session_state.filtered_df = filtered_df
+    with st.expander("Pause & continue later (save a check-later file)"):
+        st.caption("Saves everything you've done so far \u2014 including deletions/actions you've applied \u2014 "
+                   "as one file. It shows the missing % for the field team to review; all working data is hidden. "
+                   "To resume, reopen the app, pick the matching **Continue** mode, and upload this file: you land back here exactly.")
+        st.download_button("Download check-later file", data=save_checkpoint_bytes(),
+                           file_name="idela_checklater.xlsx",
+                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
-    st.write(f"Rows after pairing: **{len(filtered_df)}**")
-    high = filtered_df[(filtered_df["baseline missing %"] > 0.30) | (filtered_df["endline missing %"] > 0.30)].copy()
-    st.warning(f"Rows with baseline or endline missing above 30%: {len(high)}")
+    src = (st.session_state.scored_df.copy() if st.session_state.get("scored_df") is not None
+           else (st.session_state.paired_df.copy() if st.session_state.get("paired_df") is not None
+                 else st.session_state.mapped_df.copy()))
+    filtered_df = src.copy()
+    filtered_df.insert(0, "pre missing %", missing_pct(filtered_df, BASELINE_QUESTION_COLS))
+    if not pre_mode:
+        filtered_df.insert(1, "post missing %", missing_pct(filtered_df, ENDLINE_QUESTION_COLS))
+    st.session_state.filtered_df = filtered_df
+    pct_cols_all = ["pre missing %"] + ([] if pre_mode else ["post missing %"])
+
+    st.write(f"Rows to review: **{len(filtered_df)}**")
+    if pre_mode:
+        high = filtered_df[filtered_df["pre missing %"] > 0.30].copy()
+        st.warning(f"Rows with pre missing above 30%: {len(high)}")
+    else:
+        high = filtered_df[(filtered_df["pre missing %"] > 0.30) | (filtered_df["post missing %"] > 0.30)].copy()
+        st.warning(f"Rows with pre or post missing above 30%: {len(high)}")
 
     if len(high) > 0:
         b1, b2 = st.columns(2)
@@ -2365,24 +2429,21 @@ elif st.session_state.step == 8:
 
         disp_cols = [c for c in ["caseid", "d_childs_full_name", "e_childs_sex", "f_childs_age"] if c in high.columns]
         show = high.copy()
-        show["baseline missing %"] = show["baseline missing %"] * 100
-        show["endline missing %"] = show["endline missing %"] * 100
+        for pc in pct_cols_all:
+            show[pc] = show[pc] * 100
         show.insert(0, "Delete?", show.index.isin(st.session_state.selected_delete_indices))
-        editor_cols = ["Delete?"] + disp_cols + ["baseline missing %", "endline missing %"]
-
-        st.caption("Tick the rows to delete, then click **Apply row deletions**. Ticking inside the table no longer refreshes the page.")
+        editor_cols = ["Delete?"] + disp_cols + pct_cols_all
+        colcfg = {
+            "Delete?": st.column_config.CheckboxColumn("Delete?"),
+            "pre missing %": st.column_config.ProgressColumn("Pre missing %", format="%.1f%%", min_value=0, max_value=100),
+        }
+        if not pre_mode:
+            colcfg["post missing %"] = st.column_config.ProgressColumn("Post missing %", format="%.1f%%", min_value=0, max_value=100)
+        st.caption("Tick the rows to delete, then click **Apply row deletions**. Ticking inside the table does not refresh the page.")
         with st.form("rows_form", clear_on_submit=False):
             edited_rows = st.data_editor(
-                show[editor_cols],
-                use_container_width=True, hide_index=True, height=380,
-                column_config={
-                    "Delete?": st.column_config.CheckboxColumn("Delete?"),
-                    "baseline missing %": st.column_config.ProgressColumn("Pre missing %", format="%.1f%%", min_value=0, max_value=100),
-                    "endline missing %": st.column_config.ProgressColumn("Post missing %", format="%.1f%%", min_value=0, max_value=100),
-                },
-                disabled=disp_cols + ["baseline missing %", "endline missing %"],
-                key="rows_editor_form",
-            )
+                show[editor_cols], use_container_width=True, hide_index=True, height=380,
+                column_config=colcfg, disabled=disp_cols + pct_cols_all, key="rows_editor_form")
             applied_rows = st.form_submit_button("Apply row deletions", type="primary")
         if applied_rows:
             mask = list(edited_rows["Delete?"].values)
@@ -2390,7 +2451,7 @@ elif st.session_state.step == 8:
             st.session_state.rows_applied = True
             st.rerun()
     else:
-        st.success("No rows exceed 30% missing — nothing to delete.")
+        st.success("No rows exceed 30% missing \u2014 nothing to delete.")
         if not st.session_state.get("rows_applied"):
             if st.button("Apply (keep all rows)", type="primary"):
                 st.session_state.selected_delete_indices = set()
@@ -2399,9 +2460,9 @@ elif st.session_state.step == 8:
 
     if st.session_state.get("rows_applied"):
         delete_indices = [i for i in st.session_state.selected_delete_indices if i in filtered_df.index]
-        clean_base = filtered_df.drop(index=delete_indices).drop(columns=["baseline missing %", "endline missing %"], errors="ignore").copy()
+        clean_base = filtered_df.drop(index=delete_indices).drop(columns=pct_cols_all, errors="ignore").copy()
         st.session_state.clean_base = clean_base
-        st.success(f"{len(delete_indices)} row(s) will be deleted — {len(clean_base)} row(s) kept.")
+        st.success(f"{len(delete_indices)} row(s) will be deleted \u2014 {len(clean_base)} row(s) kept.")
         cc1, cc2 = st.columns(2)
         with cc1:
             if st.button("Back"):
@@ -2419,22 +2480,15 @@ elif st.session_state.step == 8:
 # STEP 9: Question actions
 elif st.session_state.step == 9:
     st.subheader("Step 9: Question Missing Review and Actions")
-    _dec9 = st.radio(
-        "Set question actions now, or check with the field first and continue later?",
-        ["Set actions now", "Decide later — save a check-later file"],
-        key="decide_step9", horizontal=True)
-    if _dec9.startswith("Decide later"):
-        st.info("This file shows each row's missing %. Share it with the field team; when you're ready, reopen "
-                "the app, pick the matching **Continue** mode, and upload this file to resume right here.")
-        st.download_button("Download check-later file", data=save_checkpoint_bytes(9),
-                           file_name="idela_checklater_actions.xlsx",
-                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                           type="primary")
-        if st.button("Back"):
-            go_back()
-        st.stop()
     if st.session_state.get("_last_step") != 9:
         st.session_state.qa_ready = False
+    with st.expander("Pause & continue later (save a check-later file)"):
+        st.caption("Saves everything you've done so far \u2014 including deletions/actions you've applied \u2014 "
+                   "as one file. It shows the missing % for the field team to review; all working data is hidden. "
+                   "To resume, reopen the app, pick the matching **Continue** mode, and upload this file: you land back here exactly.")
+        st.download_button("Download check-later file", data=save_checkpoint_bytes(),
+                           file_name="idela_checklater.xlsx",
+                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
     clean_base = st.session_state.clean_base.copy()
     st.info(f"Missing percentages use **{len(clean_base)} cleaned rows**. Choose an action per question, then click "
             "**Apply actions**. 'Set all to change missing to 0' can be used any time, but you must finish with "
