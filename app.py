@@ -1287,7 +1287,21 @@ def rowlevel_domains(clean_df, item_mapping=None, domain_mapping=None, max_score
         if not pre_only:
             idpost = sum(dom_post.values()) / len(dom_post)
             vdf["IDELA - post %"] = idpost.round(1)
-    return _rowlevel_assemble(clean_df, vdf, meta)
+            vdf["IDELA difference (post - pre) %"] = (idpost - idpre).round(1)
+    df, n_stat = _rowlevel_assemble(clean_df, vdf, meta)
+    if not pre_only:
+        # Placeholder T-TEST stat rows; the writer fills these with live T.TEST formulas.
+        label_col = meta[0]
+        blank = {c: "" for c in df.columns}
+        trows = []
+        for lab in ["T-TEST overall (post vs pre) p", "T-TEST male (post vs pre) p", "T-TEST female (post vs pre) p"]:
+            r = dict(blank)
+            r[label_col] = lab
+            trows.append(r)
+        tdf = pd.DataFrame(trows, columns=df.columns)
+        df = pd.concat([df.iloc[:n_stat], tdf, df.iloc[n_stat:]], ignore_index=True)
+        n_stat = n_stat + 3
+    return df, n_stat
 
 
 def write_new_workbook(raw_df, cleaned_df, q_df, i_df, d_df, rq=None, ri=None, rd=None, pre_only=False) -> bytes:
@@ -1403,14 +1417,17 @@ def write_new_workbook(raw_df, cleaned_df, q_df, i_df, d_df, rq=None, ri=None, r
             dump_colored("Domain Analysis", d_df, domain_styles(d_df), first_col_width=36)
         else:
             from xlsxwriter.utility import xl_col_to_name
-            male_rows = female_rows = None
+            all_rows = male_rows = female_rows = None
             rd_cols = []
             if rd is not None:
                 rd_df, rd_nstat = rd[0], rd[1]
                 rd_cols = list(rd_df.columns)
+                n_children = len(rd_df) - rd_nstat
+                body_start = rd_nstat + 2
+                if n_children >= 2:
+                    all_rows = (body_start, body_start + n_children - 1)
                 if "e_childs_sex" in rd_cols:
                     body_sex = rd_df["e_childs_sex"].iloc[rd_nstat:].astype(str).str.lower().tolist()
-                    body_start = rd_nstat + 2
                     m_idx = [k for k, x in enumerate(body_sex) if x.startswith("m")]
                     f_idx = [k for k, x in enumerate(body_sex) if x.startswith("f")]
                     if len(m_idx) >= 2:
@@ -1427,7 +1444,7 @@ def write_new_workbook(raw_df, cleaned_df, q_df, i_df, d_df, rq=None, ri=None, r
             dws = wb.add_worksheet("Domain Analysis")
             writer.sheets["Domain Analysis"] = dws
             base_cols = list(d_df.columns)
-            all_cols = base_cols + ["T-test male (p)", "T-test female (p)"]
+            all_cols = base_cols + ["T-test overall (p)", "T-test male (p)", "T-test female (p)"]
             for j, c in enumerate(all_cols):
                 dws.write(0, j, c, header_fmt)
 
@@ -1459,7 +1476,7 @@ def write_new_workbook(raw_df, cleaned_df, q_df, i_df, d_df, rq=None, ri=None, r
                         val = "" if pd.isna(v) else str(v)
                     dws.write(i + 1, j, val, cell_fmt(bg, k, bold))
                 pre_name, post_name = _pc_cols(label)
-                for gi, rng in enumerate([male_rows, female_rows]):
+                for gi, rng in enumerate([all_rows, male_rows, female_rows]):
                     cj = len(base_cols) + gi
                     if rng and pre_name in rd_cols and post_name in rd_cols:
                         pL = xl_col_to_name(rd_cols.index(pre_name))
@@ -1474,7 +1491,7 @@ def write_new_workbook(raw_df, cleaned_df, q_df, i_df, d_df, rq=None, ri=None, r
             sig_fmt = wb.add_format({"bg_color": "#C6EFCE", "font_color": "#006100", "bold": True,
                                      "num_format": "0.0000", "border": 1})
             if len(d_df) > 0:
-                dws.conditional_format(1, len(base_cols), len(d_df), len(base_cols) + 1,
+                dws.conditional_format(1, len(base_cols), len(d_df), len(base_cols) + 2,
                                        {"type": "cell", "criteria": "<", "value": 0.05, "format": sig_fmt})
             dws.freeze_panes(1, 0)
 
@@ -1484,6 +1501,51 @@ def write_new_workbook(raw_df, cleaned_df, q_df, i_df, d_df, rq=None, ri=None, r
             dump_rowlevel("Items (per child)", ri[0], ri[1], first_col_width=26)
         if rd is not None:
             dump_rowlevel("Domains (per child)", rd[0], rd[1], first_col_width=26)
+            if not pre_only:
+                from xlsxwriter.utility import xl_col_to_name as _xlc
+                dws2 = writer.sheets["Domains (per child)"]
+                rdf, rns = rd[0], rd[1]
+                cols2 = list(rdf.columns)
+                lcol = cols2[0]
+                nkids = len(rdf) - rns
+                bstart = rns + 2
+                allr = (bstart, bstart + nkids - 1) if nkids >= 2 else None
+                maler = femaler = None
+                if "e_childs_sex" in cols2:
+                    bs = rdf["e_childs_sex"].iloc[rns:].astype(str).str.lower().tolist()
+                    mi = [k for k, x in enumerate(bs) if x.startswith("m")]
+                    fi = [k for k, x in enumerate(bs) if x.startswith("f")]
+                    if len(mi) >= 2:
+                        maler = (bstart + min(mi), bstart + max(mi))
+                    if len(fi) >= 2:
+                        femaler = (bstart + min(fi), bstart + max(fi))
+                labels = rdf[lcol].astype(str).tolist()
+
+                def _find(prefix):
+                    for p, l in enumerate(labels):
+                        if l.startswith(prefix):
+                            return p
+                    return None
+
+                pairs = []
+                for dname in DOMAIN_MAPPING.keys():
+                    pn, qn = f"{dname} - pre %", f"{dname} - post %"
+                    if pn in cols2 and qn in cols2:
+                        pairs.append((pn, qn))
+                if "IDELA - pre %" in cols2 and "IDELA - post %" in cols2:
+                    pairs.append(("IDELA - pre %", "IDELA - post %"))
+                tfmt2 = wb.add_format({"border": 1, "num_format": "0.0000", "bold": True,
+                                       "bg_color": RESTFUL_COLORS["warm_sand"]["light"]})
+                for prefix, rng in [("T-TEST overall", allr), ("T-TEST male", maler), ("T-TEST female", femaler)]:
+                    dfpos = _find(prefix)
+                    if dfpos is None or not rng:
+                        continue
+                    wrow = dfpos + 1  # +1 for header row
+                    for pn, qn in pairs:
+                        pL, qL = _xlc(cols2.index(pn)), _xlc(cols2.index(qn))
+                        r1, r2 = rng
+                        f = f"=_xlfn.T.TEST({pL}{r1}:{pL}{r2},{qL}{r1}:{qL}{r2},2,1)"
+                        dws2.write_formula(wrow, cols2.index(qn), f, tfmt2)
     return out.getvalue()
 
 
