@@ -332,6 +332,7 @@ def init_state():
         "qi_applied": False,
         "di_applied": False,
         "rows_applied": False,
+        "analysis_mode": None,
         "value_recode_mapping": {},
         "actions": {},
         "selected_delete_indices": set(),
@@ -829,72 +830,86 @@ def detect_count_questions(df, question_cols):
     return found
 
 
-def analysis_by_question(clean_df, max_scores=None):
-    """Per-question: mean pre/post score and pre/post % (= score / max), plus the change."""
+def analysis_by_question(clean_df, max_scores=None, pre_only=False):
     rows = []
     for base_col in BASELINE_QUESTION_COLS:
+        if base_col not in clean_df.columns:
+            continue
         post_col = f"{base_col}_post"
-        if base_col not in clean_df.columns or post_col not in clean_df.columns:
+        has_post = post_col in clean_df.columns
+        if not pre_only and not has_post:
             continue
         mx = question_max_score(base_col, max_scores)
         pre = pd.to_numeric(clean_df[base_col], errors="coerce")
-        post = pd.to_numeric(clean_df[post_col], errors="coerce")
         pre_score = float(pre.mean()) if len(pre) else 0.0
-        post_score = float(post.mean()) if len(post) else 0.0
         pre_pct = (pre_score / mx * 100) if mx else 0.0
-        post_pct = (post_score / mx * 100) if mx else 0.0
-        rows.append({
-            "Question": question_excel_name(base_col, "both"),
-            "Question ID": base_col,
-            "Max score": mx,
-            "Pre score": round(pre_score, 3),
-            "Post score": round(post_score, 3),
-            "Pre %": round(pre_pct, 1),
-            "Post %": round(post_pct, 1),
-            "Post - Pre %": round(post_pct - pre_pct, 1),
-        })
+        if pre_only:
+            rows.append({
+                "Question": question_excel_name(base_col, "both"),
+                "Question ID": base_col,
+                "Max score": mx,
+                "Pre score": round(pre_score, 3),
+                "Pre %": round(pre_pct, 1),
+            })
+        else:
+            post = pd.to_numeric(clean_df[post_col], errors="coerce")
+            post_score = float(post.mean()) if len(post) else 0.0
+            post_pct = (post_score / mx * 100) if mx else 0.0
+            rows.append({
+                "Question": question_excel_name(base_col, "both"),
+                "Question ID": base_col,
+                "Max score": mx,
+                "Pre score": round(pre_score, 3),
+                "Post score": round(post_score, 3),
+                "Pre %": round(pre_pct, 1),
+                "Post %": round(post_pct, 1),
+                "Post - Pre %": round(post_pct - pre_pct, 1),
+            })
     return pd.DataFrame(rows)
 
 
-def analysis_by_item(clean_df, item_mapping=None, max_scores=None):
-    """Per-item: item score = mean over children of (sum of its question values);
-    item max = sum of its question maxima; item % = score / max."""
+def analysis_by_item(clean_df, item_mapping=None, max_scores=None, pre_only=False):
     if item_mapping is None:
         item_mapping = ITEM_MAPPING
     ordered = [f"ITEM_{i}" for i in range(1, 22)]
     rows = []
     for item_id in ordered:
-        qs = [q for q, it in item_mapping.items()
-              if it == item_id and q in clean_df.columns and f"{q}_post" in clean_df.columns]
+        if pre_only:
+            qs = [q for q, it in item_mapping.items() if it == item_id and q in clean_df.columns]
+        else:
+            qs = [q for q, it in item_mapping.items()
+                  if it == item_id and q in clean_df.columns and f"{q}_post" in clean_df.columns]
         if not qs:
             continue
         item_max = sum(question_max_score(q, max_scores) for q in qs)
         pre_sum = pd.Series(0.0, index=clean_df.index)
-        post_sum = pd.Series(0.0, index=clean_df.index)
         for q in qs:
             pre_sum = pre_sum + pd.to_numeric(clean_df[q], errors="coerce").fillna(0)
-            post_sum = post_sum + pd.to_numeric(clean_df[f"{q}_post"], errors="coerce").fillna(0)
         pre_score = float(pre_sum.mean()) if len(pre_sum) else 0.0
-        post_score = float(post_sum.mean()) if len(post_sum) else 0.0
         pre_pct = (pre_score / item_max * 100) if item_max else 0.0
-        post_pct = (post_score / item_max * 100) if item_max else 0.0
-        rows.append({
-            "Item": f"{item_id} - {ITEM_NAMES.get(item_id, item_id)}",
-            "Item ID": item_id,
-            "Questions": len(qs),
-            "Max score": item_max,
-            "Pre score": round(pre_score, 3),
-            "Post score": round(post_score, 3),
-            "Pre %": round(pre_pct, 1),
-            "Post %": round(post_pct, 1),
-            "Post - Pre %": round(post_pct - pre_pct, 1),
-        })
+        if pre_only:
+            rows.append({
+                "Item": f"{item_id} - {ITEM_NAMES.get(item_id, item_id)}",
+                "Item ID": item_id, "Questions": len(qs), "Max score": item_max,
+                "Pre score": round(pre_score, 3), "Pre %": round(pre_pct, 1),
+            })
+        else:
+            post_sum = pd.Series(0.0, index=clean_df.index)
+            for q in qs:
+                post_sum = post_sum + pd.to_numeric(clean_df[f"{q}_post"], errors="coerce").fillna(0)
+            post_score = float(post_sum.mean()) if len(post_sum) else 0.0
+            post_pct = (post_score / item_max * 100) if item_max else 0.0
+            rows.append({
+                "Item": f"{item_id} - {ITEM_NAMES.get(item_id, item_id)}",
+                "Item ID": item_id, "Questions": len(qs), "Max score": item_max,
+                "Pre score": round(pre_score, 3), "Post score": round(post_score, 3),
+                "Pre %": round(pre_pct, 1), "Post %": round(post_pct, 1),
+                "Post - Pre %": round(post_pct - pre_pct, 1),
+            })
     return pd.DataFrame(rows)
 
 
-def analysis_by_domain(question_analysis_df, item_mapping=None, domain_mapping=None):
-    """Per-domain: average of the pre/post % of the questions that belong to the domain.
-    IDELA score = average of the four domain %s."""
+def analysis_by_domain(question_analysis_df, item_mapping=None, domain_mapping=None, pre_only=False):
     if item_mapping is None:
         item_mapping = ITEM_MAPPING
     if domain_mapping is None:
@@ -913,52 +928,40 @@ def analysis_by_domain(question_analysis_df, item_mapping=None, domain_mapping=N
     pre_vals, post_vals = [], []
     for d in domain_mapping.keys():
         qids = [q for q, dd in q_to_domain.items() if dd == d and len(qa) and q in qa.index]
-        if qids:
-            pre_pct = float(qa.loc[qids, "Pre %"].mean())
-            post_pct = float(qa.loc[qids, "Post %"].mean())
-        else:
-            pre_pct = post_pct = 0.0
+        pre_pct = float(qa.loc[qids, "Pre %"].mean()) if qids else 0.0
         pre_vals.append(pre_pct)
-        post_vals.append(post_pct)
-        rows.append({
-            "Domain": d,
-            "Questions": len(qids),
-            "Pre %": round(pre_pct, 1),
-            "Post %": round(post_pct, 1),
-            "Post - Pre %": round(post_pct - pre_pct, 1),
-        })
+        if pre_only:
+            rows.append({"Domain": d, "Questions": len(qids), "Pre %": round(pre_pct, 1)})
+        else:
+            post_pct = float(qa.loc[qids, "Post %"].mean()) if qids else 0.0
+            post_vals.append(post_pct)
+            rows.append({"Domain": d, "Questions": len(qids), "Pre %": round(pre_pct, 1),
+                         "Post %": round(post_pct, 1), "Post - Pre %": round(post_pct - pre_pct, 1)})
     idela_pre = sum(pre_vals) / len(pre_vals) if pre_vals else 0.0
-    idela_post = sum(post_vals) / len(post_vals) if post_vals else 0.0
-    rows.append({
-        "Domain": "IDELA SCORE (average of domains)",
-        "Questions": "",
-        "Pre %": round(idela_pre, 1),
-        "Post %": round(idela_post, 1),
-        "Post - Pre %": round(idela_post - idela_pre, 1),
-    })
+    if pre_only:
+        rows.append({"Domain": "IDELA SCORE (average of domains)", "Questions": "", "Pre %": round(idela_pre, 1)})
+    else:
+        idela_post = sum(post_vals) / len(post_vals) if post_vals else 0.0
+        rows.append({"Domain": "IDELA SCORE (average of domains)", "Questions": "",
+                     "Pre %": round(idela_pre, 1), "Post %": round(idela_post, 1),
+                     "Post - Pre %": round(idela_post - idela_pre, 1)})
     return pd.DataFrame(rows)
 
 
-def build_cleaned_data_sheet(clean_df, max_scores=None):
-    """Essential info + question values (pre/post) + a per-child IDELA % score."""
+def build_cleaned_data_sheet(clean_df, max_scores=None, pre_only=False):
+    """Essential info + question values (pre, and post when applicable). No IDELA score column."""
     meta = [c for c in META_COLUMNS if c in clean_df.columns and c != "IDELA_date"]
     out = clean_df[meta].copy()
-    q_used = [q for q in BASELINE_QUESTION_COLS
-              if q in clean_df.columns and f"{q}_post" in clean_df.columns]
-    total_max = sum(question_max_score(q, max_scores) for q in q_used)
-    pre_ach = pd.Series(0.0, index=clean_df.index)
-    post_ach = pd.Series(0.0, index=clean_df.index)
+    if pre_only:
+        q_used = [q for q in BASELINE_QUESTION_COLS if q in clean_df.columns]
+    else:
+        q_used = [q for q in BASELINE_QUESTION_COLS
+                  if q in clean_df.columns and f"{q}_post" in clean_df.columns]
     for q in q_used:
-        pre = pd.to_numeric(clean_df[q], errors="coerce").fillna(0)
-        post = pd.to_numeric(clean_df[f"{q}_post"], errors="coerce").fillna(0)
-        pre_ach = pre_ach + pre
-        post_ach = post_ach + post
         name = question_excel_name(q, "english")
-        out[f"{name} (pre)"] = pre
-        out[f"{name} (post)"] = post
-    out["IDELA pre %"] = (pre_ach / total_max * 100).round(1) if total_max else 0.0
-    out["IDELA post %"] = (post_ach / total_max * 100).round(1) if total_max else 0.0
-    out["IDELA change %"] = (out["IDELA post %"] - out["IDELA pre %"]).round(1)
+        out[f"{name} (pre)"] = pd.to_numeric(clean_df[q], errors="coerce")
+        if not pre_only:
+            out[f"{name} (post)"] = pd.to_numeric(clean_df[f"{q}_post"], errors="coerce")
     return out
 
 
@@ -1201,44 +1204,54 @@ def _rowlevel_assemble(clean_df, vdf, meta):
     return out, len(stats)
 
 
-def rowlevel_questions(clean_df, max_scores=None):
+def rowlevel_questions(clean_df, max_scores=None, pre_only=False):
     meta = _rowlevel_meta(clean_df)
-    q_used = [q for q in BASELINE_QUESTION_COLS if q in clean_df.columns and f"{q}_post" in clean_df.columns]
+    if pre_only:
+        q_used = [q for q in BASELINE_QUESTION_COLS if q in clean_df.columns]
+    else:
+        q_used = [q for q in BASELINE_QUESTION_COLS
+                  if q in clean_df.columns and f"{q}_post" in clean_df.columns]
     vdf = pd.DataFrame(index=clean_df.index)
     for q in q_used:
         vdf[f"{q} - pre"] = pd.to_numeric(clean_df[q], errors="coerce")
-        vdf[f"{q} - post"] = pd.to_numeric(clean_df[f"{q}_post"], errors="coerce")
+        if not pre_only:
+            vdf[f"{q} - post"] = pd.to_numeric(clean_df[f"{q}_post"], errors="coerce")
     return _rowlevel_assemble(clean_df, vdf, meta)
 
 
-def rowlevel_items(clean_df, item_mapping=None, max_scores=None):
+def rowlevel_items(clean_df, item_mapping=None, max_scores=None, pre_only=False):
     if item_mapping is None:
         item_mapping = ITEM_MAPPING
     meta = _rowlevel_meta(clean_df)
     vdf = pd.DataFrame(index=clean_df.index)
     for item_id in [f"ITEM_{i}" for i in range(1, 22)]:
-        qs = [q for q, it in item_mapping.items()
-              if it == item_id and q in clean_df.columns and f"{q}_post" in clean_df.columns]
+        if pre_only:
+            qs = [q for q, it in item_mapping.items() if it == item_id and q in clean_df.columns]
+        else:
+            qs = [q for q, it in item_mapping.items()
+                  if it == item_id and q in clean_df.columns and f"{q}_post" in clean_df.columns]
         if not qs:
             continue
         item_max = sum(question_max_score(q, max_scores) for q in qs)
         pre = pd.Series(0.0, index=clean_df.index)
-        post = pd.Series(0.0, index=clean_df.index)
         for q in qs:
             pre = pre + pd.to_numeric(clean_df[q], errors="coerce").fillna(0)
-            post = post + pd.to_numeric(clean_df[f"{q}_post"], errors="coerce").fillna(0)
         nm = f"{item_id} {ITEM_NAMES.get(item_id, item_id)}"
         vdf[f"{nm} - pre %"] = (pre / item_max * 100).round(1) if item_max else 0.0
-        vdf[f"{nm} - post %"] = (post / item_max * 100).round(1) if item_max else 0.0
+        if not pre_only:
+            post = pd.Series(0.0, index=clean_df.index)
+            for q in qs:
+                post = post + pd.to_numeric(clean_df[f"{q}_post"], errors="coerce").fillna(0)
+            vdf[f"{nm} - post %"] = (post / item_max * 100).round(1) if item_max else 0.0
     return _rowlevel_assemble(clean_df, vdf, meta)
 
 
-def rowlevel_domains(clean_df, item_mapping=None, domain_mapping=None, max_scores=None):
+def rowlevel_domains(clean_df, item_mapping=None, domain_mapping=None, max_scores=None, pre_only=False):
     if item_mapping is None:
         item_mapping = ITEM_MAPPING
     if domain_mapping is None:
         domain_mapping = DOMAIN_MAPPING
-    # Group children by gender (males first, then females) so the T.TEST ranges are contiguous.
+    # Group children by gender (males first, then females) so T.TEST ranges are contiguous.
     if "e_childs_sex" in clean_df.columns:
         _gkey = clean_df["e_childs_sex"].astype(str).str.lower().map(
             lambda v: 0 if v.startswith("m") else (1 if v.startswith("f") else 2))
@@ -1252,35 +1265,34 @@ def rowlevel_domains(clean_df, item_mapping=None, domain_mapping=None, max_score
     post_lists = {d: [] for d in domain_mapping}
     for q, it in item_mapping.items():
         d = item_to_domain.get(it)
-        if d is None or q not in clean_df.columns or f"{q}_post" not in clean_df.columns:
+        if d is None or q not in clean_df.columns:
             continue
         mx = question_max_score(q, max_scores)
         pre_lists[d].append(pd.to_numeric(clean_df[q], errors="coerce").fillna(0) / mx * 100)
-        post_lists[d].append(pd.to_numeric(clean_df[f"{q}_post"], errors="coerce").fillna(0) / mx * 100)
+        if not pre_only and f"{q}_post" in clean_df.columns:
+            post_lists[d].append(pd.to_numeric(clean_df[f"{q}_post"], errors="coerce").fillna(0) / mx * 100)
     vdf = pd.DataFrame(index=clean_df.index)
     dom_pre, dom_post = {}, {}
     for d in domain_mapping:
-        if pre_lists[d]:
-            pre = sum(pre_lists[d]) / len(pre_lists[d])
-            post = sum(post_lists[d]) / len(post_lists[d])
-        else:
-            pre = pd.Series(0.0, index=clean_df.index)
-            post = pd.Series(0.0, index=clean_df.index)
+        pre = sum(pre_lists[d]) / len(pre_lists[d]) if pre_lists[d] else pd.Series(0.0, index=clean_df.index)
         dom_pre[d] = pre
-        dom_post[d] = post
         vdf[f"{d} - pre %"] = pre.round(1)
-        vdf[f"{d} - post %"] = post.round(1)
+        if not pre_only:
+            post = sum(post_lists[d]) / len(post_lists[d]) if post_lists[d] else pd.Series(0.0, index=clean_df.index)
+            dom_post[d] = post
+            vdf[f"{d} - post %"] = post.round(1)
     if dom_pre:
         idpre = sum(dom_pre.values()) / len(dom_pre)
-        idpost = sum(dom_post.values()) / len(dom_post)
         vdf["IDELA - pre %"] = idpre.round(1)
-        vdf["IDELA - post %"] = idpost.round(1)
-        vdf["IDELA - change %"] = (idpost - idpre).round(1)
+        if not pre_only:
+            idpost = sum(dom_post.values()) / len(dom_post)
+            vdf["IDELA - post %"] = idpost.round(1)
     return _rowlevel_assemble(clean_df, vdf, meta)
 
 
-def write_new_workbook(raw_df, cleaned_df, q_df, i_df, d_df, rq=None, ri=None, rd=None) -> bytes:
-    """Cohort sheets (Question/Item/Domain) plus per-child row-level sheets with AVERAGE/MIN/MAX rows."""
+def write_new_workbook(raw_df, cleaned_df, q_df, i_df, d_df, rq=None, ri=None, rd=None, pre_only=False) -> bytes:
+    """Cohort sheets (Question/Item/Domain) plus per-child row-level sheets with AVERAGE/MIN/MAX rows.
+    For pre-only analysis there are no Post/change columns and no t-test."""
     out = io.BytesIO()
     with pd.ExcelWriter(out, engine="xlsxwriter") as writer:
         wb = writer.book
@@ -1376,87 +1388,95 @@ def write_new_workbook(raw_df, cleaned_df, q_df, i_df, d_df, rq=None, ri=None, r
         dump_colored("Question Analysis", q_df, [(zebra[i % 2], False) for i in range(len(q_df))])
         dump_colored("Item Analysis", i_df, [(zebra[i % 2], False) for i in range(len(i_df))])
 
-        from xlsxwriter.utility import xl_col_to_name
-
-        # Locate contiguous male / female row ranges in the per-child domains sheet (rd).
-        male_rows = female_rows = None
-        rd_cols = []
-        if rd is not None:
-            rd_df, rd_nstat = rd[0], rd[1]
-            rd_cols = list(rd_df.columns)
-            if "e_childs_sex" in rd_cols:
-                body_sex = rd_df["e_childs_sex"].iloc[rd_nstat:].astype(str).str.lower().tolist()
-                body_start = rd_nstat + 2  # +1 header, +n_stat rows, then body begins
-                m_idx = [k for k, x in enumerate(body_sex) if x.startswith("m")]
-                f_idx = [k for k, x in enumerate(body_sex) if x.startswith("f")]
-                if len(m_idx) >= 2:
-                    male_rows = (body_start + min(m_idx), body_start + max(m_idx))
-                if len(f_idx) >= 2:
-                    female_rows = (body_start + min(f_idx), body_start + max(f_idx))
-
-        PC = "Domains (per child)"
-
-        def _pc_cols(label):
-            if str(label).startswith("IDELA"):
-                return ("IDELA - pre %", "IDELA - post %")
-            return (f"{label} - pre %", f"{label} - post %")
-
-        dws = wb.add_worksheet("Domain Analysis")
-        writer.sheets["Domain Analysis"] = dws
-        base_cols = list(d_df.columns)
-        all_cols = base_cols + ["T-test male (p)", "T-test female (p)"]
-        for j, c in enumerate(all_cols):
-            dws.write(0, j, c, header_fmt)
-
-        def tfmt(bg, bold):
-            d = {"border": 1, "valign": "vcenter", "num_format": "0.0000"}
-            if bg:
-                d["bg_color"] = bg
-            if bold:
-                d["bold"] = True
-            return wb.add_format(d)
-
         med = [RESTFUL_COLORS[n]["medium"] for n in RESTFUL_ORDER]
-        di = 0
-        for i in range(len(d_df)):
-            label = str(d_df.iloc[i]["Domain"])
-            is_idela = label.startswith("IDELA")
-            bg = RESTFUL_COLORS["warm_sand"]["medium"] if is_idela else med[di % 4]
-            if not is_idela:
-                di += 1
-            bold = is_idela
-            for j, c in enumerate(base_cols):
-                v = d_df.iloc[i][c]
-                k = kind_of(c)
-                if k in ("pct", "num"):
-                    try:
-                        val = float(v)
-                    except Exception:
-                        val = 0.0
-                else:
-                    val = "" if pd.isna(v) else str(v)
-                dws.write(i + 1, j, val, cell_fmt(bg, k, bold))
-            pre_name, post_name = _pc_cols(label)
-            for gi, rng in enumerate([male_rows, female_rows]):
-                cj = len(base_cols) + gi
-                if rng and pre_name in rd_cols and post_name in rd_cols:
-                    pL = xl_col_to_name(rd_cols.index(pre_name))
-                    qL = xl_col_to_name(rd_cols.index(post_name))
-                    r1, r2 = rng
-                    formula = f"=_xlfn.T.TEST('{PC}'!{pL}{r1}:{pL}{r2},'{PC}'!{qL}{r1}:{qL}{r2},2,1)"
-                    dws.write_formula(i + 1, cj, formula, tfmt(bg, bold))
-                else:
-                    dws.write(i + 1, cj, "n/a", cell_fmt(bg, "text", bold))
-        dws.set_column(0, 0, 36)
-        dws.set_column(1, len(all_cols) - 1, 15)
 
-        # Highlight significant changes (p < 0.05) in the two t-test columns.
-        sig_fmt = wb.add_format({"bg_color": "#C6EFCE", "font_color": "#006100", "bold": True,
-                                 "num_format": "0.0000", "border": 1})
-        if len(d_df) > 0:
-            dws.conditional_format(1, len(base_cols), len(d_df), len(base_cols) + 1,
-                                   {"type": "cell", "criteria": "<", "value": 0.05, "format": sig_fmt})
-        dws.freeze_panes(1, 0)
+        def domain_styles(df):
+            styles, di = [], 0
+            for _, r in df.iterrows():
+                if str(r["Domain"]).startswith("IDELA"):
+                    styles.append((RESTFUL_COLORS["warm_sand"]["medium"], True))
+                else:
+                    styles.append((med[di % 4], False)); di += 1
+            return styles
+
+        if pre_only:
+            dump_colored("Domain Analysis", d_df, domain_styles(d_df), first_col_width=36)
+        else:
+            from xlsxwriter.utility import xl_col_to_name
+            male_rows = female_rows = None
+            rd_cols = []
+            if rd is not None:
+                rd_df, rd_nstat = rd[0], rd[1]
+                rd_cols = list(rd_df.columns)
+                if "e_childs_sex" in rd_cols:
+                    body_sex = rd_df["e_childs_sex"].iloc[rd_nstat:].astype(str).str.lower().tolist()
+                    body_start = rd_nstat + 2
+                    m_idx = [k for k, x in enumerate(body_sex) if x.startswith("m")]
+                    f_idx = [k for k, x in enumerate(body_sex) if x.startswith("f")]
+                    if len(m_idx) >= 2:
+                        male_rows = (body_start + min(m_idx), body_start + max(m_idx))
+                    if len(f_idx) >= 2:
+                        female_rows = (body_start + min(f_idx), body_start + max(f_idx))
+            PC = "Domains (per child)"
+
+            def _pc_cols(label):
+                if str(label).startswith("IDELA"):
+                    return ("IDELA - pre %", "IDELA - post %")
+                return (f"{label} - pre %", f"{label} - post %")
+
+            dws = wb.add_worksheet("Domain Analysis")
+            writer.sheets["Domain Analysis"] = dws
+            base_cols = list(d_df.columns)
+            all_cols = base_cols + ["T-test male (p)", "T-test female (p)"]
+            for j, c in enumerate(all_cols):
+                dws.write(0, j, c, header_fmt)
+
+            def tfmt(bg, bold):
+                d = {"border": 1, "valign": "vcenter", "num_format": "0.0000"}
+                if bg:
+                    d["bg_color"] = bg
+                if bold:
+                    d["bold"] = True
+                return wb.add_format(d)
+
+            di = 0
+            for i in range(len(d_df)):
+                label = str(d_df.iloc[i]["Domain"])
+                is_idela = label.startswith("IDELA")
+                bg = RESTFUL_COLORS["warm_sand"]["medium"] if is_idela else med[di % 4]
+                if not is_idela:
+                    di += 1
+                bold = is_idela
+                for j, c in enumerate(base_cols):
+                    v = d_df.iloc[i][c]
+                    k = kind_of(c)
+                    if k in ("pct", "num"):
+                        try:
+                            val = float(v)
+                        except Exception:
+                            val = 0.0
+                    else:
+                        val = "" if pd.isna(v) else str(v)
+                    dws.write(i + 1, j, val, cell_fmt(bg, k, bold))
+                pre_name, post_name = _pc_cols(label)
+                for gi, rng in enumerate([male_rows, female_rows]):
+                    cj = len(base_cols) + gi
+                    if rng and pre_name in rd_cols and post_name in rd_cols:
+                        pL = xl_col_to_name(rd_cols.index(pre_name))
+                        qL = xl_col_to_name(rd_cols.index(post_name))
+                        r1, r2 = rng
+                        formula = f"=_xlfn.T.TEST('{PC}'!{pL}{r1}:{pL}{r2},'{PC}'!{qL}{r1}:{qL}{r2},2,1)"
+                        dws.write_formula(i + 1, cj, formula, tfmt(bg, bold))
+                    else:
+                        dws.write(i + 1, cj, "n/a", cell_fmt(bg, "text", bold))
+            dws.set_column(0, 0, 36)
+            dws.set_column(1, len(all_cols) - 1, 15)
+            sig_fmt = wb.add_format({"bg_color": "#C6EFCE", "font_color": "#006100", "bold": True,
+                                     "num_format": "0.0000", "border": 1})
+            if len(d_df) > 0:
+                dws.conditional_format(1, len(base_cols), len(d_df), len(base_cols) + 1,
+                                       {"type": "cell", "criteria": "<", "value": 0.05, "format": sig_fmt})
+            dws.freeze_panes(1, 0)
 
         if rq is not None:
             dump_rowlevel("Questions (per child)", rq[0], rq[1])
@@ -1783,7 +1803,106 @@ def build_duplicated_rows_df(raw_df: pd.DataFrame, mapping: Dict[str, str], base
     return keep_standard_columns(merged)
 
 
+def save_checkpoint_bytes(resume_step):
+    """A real .xlsx: one visible sheet with each row's missing %, plus hidden sheets
+    carrying the full state so a 'Continue' mode can resume at exactly resume_step."""
+    import json
+    ss = st.session_state
+    src = ss.get("scored_df")
+    if src is None:
+        src = ss.get("clean_base")
+    if src is None:
+        src = ss.get("paired_df")
+    if src is None:
+        src = ss.get("mapped_df")
+    miss = pd.DataFrame({"info": ["No data available"]})
+    if src is not None:
+        keep = [c for c in ["caseid", "d_childs_full_name", "child_name", "student_name",
+                            "e_childs_sex", "f_childs_age", "teacher_location"] if c in src.columns]
+        miss = src[keep].copy() if keep else pd.DataFrame(index=range(len(src)))
+        miss["missing % (pre)"] = (missing_pct(src, BASELINE_QUESTION_COLS) * 100).round(1).values
+        if any(c in src.columns for c in ENDLINE_QUESTION_COLS):
+            miss["missing % (post)"] = (missing_pct(src, ENDLINE_QUESTION_COLS) * 100).round(1).values
+    out = io.BytesIO()
+    with pd.ExcelWriter(out, engine="xlsxwriter") as writer:
+        miss.to_excel(writer, sheet_name="Missing % per row", index=False)
+        meta = {
+            "resume_step": int(resume_step),
+            "analysis_mode": ss.get("analysis_mode"),
+            "item_mapping": ss.get("item_mapping") or {},
+            "domain_mapping": ss.get("domain_mapping") or {},
+            "max_scores": ss.get("max_scores") or {},
+            "actions": ss.get("actions") or {},
+        }
+        pd.DataFrame({"json": [json.dumps(meta)]}).to_excel(writer, sheet_name="_meta", index=False)
+        writer.sheets["_meta"].hide()
+        for key in ["scored_df", "clean_base", "filtered_df", "download_raw_df", "paired_df", "mapped_df"]:
+            dfk = ss.get(key)
+            if dfk is not None and hasattr(dfk, "to_excel"):
+                sh = ("_" + key)[:31]
+                dfk.to_excel(writer, sheet_name=sh, index=False)
+                writer.sheets[sh].hide()
+    return out.getvalue()
+
+
+def load_checkpoint(file):
+    import json
+    ss = st.session_state
+    xls = pd.ExcelFile(file)
+    if "_meta" not in xls.sheet_names:
+        raise ValueError("This file is not an IDELA check-later file.")
+    meta = json.loads(pd.read_excel(xls, "_meta")["json"].iloc[0])
+    ss["analysis_mode"] = meta.get("analysis_mode")
+    ss["item_mapping"] = {str(k): v for k, v in (meta.get("item_mapping") or {}).items()}
+    ss["domain_mapping"] = {k: list(v) for k, v in (meta.get("domain_mapping") or {}).items()}
+    ss["max_scores"] = {str(k): float(v) for k, v in (meta.get("max_scores") or {}).items()}
+    ss["actions"] = dict(meta.get("actions") or {})
+    for key in ["scored_df", "clean_base", "filtered_df", "download_raw_df", "paired_df", "mapped_df"]:
+        sh = ("_" + key)[:31]
+        if sh in xls.sheet_names:
+            ss[key] = pd.read_excel(xls, sh)
+    ss["step"] = int(meta.get("resume_step", 8))
+    ss["rows_applied"] = False
+    ss["qa_ready"] = False
+    ss["_last_step"] = None
+    ss["selected_delete_indices"] = set()
+
+
 init_state()
+
+if st.session_state.get("analysis_mode") is None:
+    st.subheader("Choose the type of analysis")
+    choice = st.radio(
+        "How would you like to start?",
+        ["1) Pre analysis",
+         "2) Continue Pre analysis",
+         "3) Post and Pre analysis",
+         "4) Continue Post and Pre analysis"],
+        index=None,
+    )
+    if choice:
+        if choice.startswith("1"):
+            if st.button("Start Pre analysis", type="primary"):
+                st.session_state.analysis_mode = "pre"
+                st.session_state.step = 1
+                st.rerun()
+        elif choice.startswith("3"):
+            if st.button("Start Post and Pre analysis", type="primary"):
+                st.session_state.analysis_mode = "prepost"
+                st.session_state.step = 1
+                st.rerun()
+        else:
+            st.caption("Upload the check-later file you saved earlier to continue exactly where you left off.")
+            up = st.file_uploader("Upload check-later file (.xlsx)", type=["xlsx"], key="ckpt_up")
+            if up is not None:
+                try:
+                    load_checkpoint(up)
+                    st.success("Session restored. Continuing where you left off.")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Could not read this file: {e}")
+    st.stop()
+
 render_sidebar()
 show_progress()
 st.divider()
@@ -1894,7 +2013,10 @@ elif st.session_state.step == 2:
                     post_col = f"{base_col}_post"
                     selectbox_mapping(question_mapping_label(post_col), post_col, uploaded_cols, post_col, mapping, endline_hint=True)
 
-        required_keys = META_COLUMNS + BASELINE_QUESTION_COLS + ENDLINE_QUESTION_COLS
+        if st.session_state.get("analysis_mode") == "pre":
+            required_keys = META_COLUMNS + BASELINE_QUESTION_COLS
+        else:
+            required_keys = META_COLUMNS + BASELINE_QUESTION_COLS + ENDLINE_QUESTION_COLS
 
         if st.button("Next: Pair pre/post", type="primary"):
             missing = [k for k in required_keys if not mapping.get(k)]
@@ -2033,7 +2155,10 @@ elif st.session_state.step == 3:
 
     has_pre = _side_has_data(base_cols)
     has_post = _side_has_data(end_cols)
-    paired_mask = has_pre & has_post
+    if st.session_state.get("analysis_mode") == "pre":
+        paired_mask = has_pre
+    else:
+        paired_mask = has_pre & has_post
 
     total = int(len(source_df))
     kept = int(paired_mask.sum())
@@ -2187,6 +2312,20 @@ elif st.session_state.step == 4:
 # STEP 8: Row review
 elif st.session_state.step == 8:
     st.subheader("Step 8: Review rows with high missing percentage")
+    _dec8 = st.radio(
+        "Delete rows now, or check with the field first and continue later?",
+        ["Delete rows now", "Decide later — save a check-later file"],
+        key="decide_step8", horizontal=True)
+    if _dec8.startswith("Decide later"):
+        st.info("This file shows each row's missing %. Share it with the field team; when you're ready, reopen "
+                "the app, pick the matching **Continue** mode, and upload this file to resume right here.")
+        st.download_button("Download check-later file", data=save_checkpoint_bytes(8),
+                           file_name="idela_checklater_review.xlsx",
+                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                           type="primary")
+        if st.button("Back"):
+            go_back()
+        st.stop()
     if st.session_state.get("_last_step") != 8:
         st.session_state.rows_applied = False
     mapped_df = (st.session_state.scored_df.copy() if st.session_state.get("scored_df") is not None
@@ -2270,6 +2409,20 @@ elif st.session_state.step == 8:
 # STEP 9: Question actions
 elif st.session_state.step == 9:
     st.subheader("Step 9: Question Missing Review and Actions")
+    _dec9 = st.radio(
+        "Set question actions now, or check with the field first and continue later?",
+        ["Set actions now", "Decide later — save a check-later file"],
+        key="decide_step9", horizontal=True)
+    if _dec9.startswith("Decide later"):
+        st.info("This file shows each row's missing %. Share it with the field team; when you're ready, reopen "
+                "the app, pick the matching **Continue** mode, and upload this file to resume right here.")
+        st.download_button("Download check-later file", data=save_checkpoint_bytes(9),
+                           file_name="idela_checklater_actions.xlsx",
+                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                           type="primary")
+        if st.button("Back"):
+            go_back()
+        st.stop()
     if st.session_state.get("_last_step") != 9:
         st.session_state.qa_ready = False
     clean_base = st.session_state.clean_base.copy()
@@ -2296,12 +2449,11 @@ elif st.session_state.step == 9:
         if current not in valid_actions:
             current = default_action
         base_cols_order.append(base_col)
-        rows.append({
-            "Question": f"{base_col} — {eng}",
-            "Pre missing %": round(base_missing * 100, 1),
-            "Post missing %": round(end_missing * 100, 1),
-            "Action": current,
-        })
+        row = {"Question": f"{base_col} — {eng}", "Pre missing %": round(base_missing * 100, 1)}
+        if st.session_state.get("analysis_mode") != "pre":
+            row["Post missing %"] = round(end_missing * 100, 1)
+        row["Action"] = current
+        rows.append(row)
     question_review_df = pd.DataFrame(rows)
 
     with st.form("question_actions_form", clear_on_submit=False):
@@ -2590,10 +2742,11 @@ elif st.session_state.step == 10:
     remaining_question_cols = [c for c in BASELINE_QUESTION_COLS + ENDLINE_QUESTION_COLS if c in clean_df.columns]
     remaining_missing_summary = get_remaining_missing_summary(clean_df, remaining_question_cols)
 
-    q_df = analysis_by_question(clean_df, max_scores)
-    i_df = analysis_by_item(clean_df, item_mapping, max_scores)
-    d_df = analysis_by_domain(q_df, item_mapping, domain_mapping)
-    cleaned_sheet = build_cleaned_data_sheet(clean_df, max_scores)
+    pre_only = st.session_state.get("analysis_mode") == "pre"
+    q_df = analysis_by_question(clean_df, max_scores, pre_only=pre_only)
+    i_df = analysis_by_item(clean_df, item_mapping, max_scores, pre_only=pre_only)
+    d_df = analysis_by_domain(q_df, item_mapping, domain_mapping, pre_only=pre_only)
+    cleaned_sheet = build_cleaned_data_sheet(clean_df, max_scores, pre_only=pre_only)
 
     st.write("Question analysis preview")
     st.dataframe(q_df, use_container_width=True, hide_index=True)
@@ -2608,10 +2761,10 @@ elif st.session_state.step == 10:
         raw_sheet = st.session_state.get("download_raw_df")
         if raw_sheet is None:
             raw_sheet = st.session_state.get("filtered_df", clean_df)
-        rq = rowlevel_questions(clean_df, max_scores)
-        ri = rowlevel_items(clean_df, item_mapping, max_scores)
-        rd = rowlevel_domains(clean_df, item_mapping, domain_mapping, max_scores)
-        excel_bytes = write_new_workbook(raw_sheet, cleaned_sheet, q_df, i_df, d_df, rq, ri, rd)
+        rq = rowlevel_questions(clean_df, max_scores, pre_only=pre_only)
+        ri = rowlevel_items(clean_df, item_mapping, max_scores, pre_only=pre_only)
+        rd = rowlevel_domains(clean_df, item_mapping, domain_mapping, max_scores, pre_only=pre_only)
+        excel_bytes = write_new_workbook(raw_sheet, cleaned_sheet, q_df, i_df, d_df, rq, ri, rd, pre_only=pre_only)
         st.success("Workbook ready: raw data, cleaned data, and question / item / domain analysis.")
         st.download_button(
             label="Download IDELA analysis workbook",
