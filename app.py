@@ -2133,8 +2133,14 @@ elif st.session_state.step == 2:
 
 # STEP 3: Pair pre/post by case ID and drop unpaired children
 elif st.session_state.step == 3:
-    st.subheader("Step 3: Pair pre/post and drop unpaired children")
-    st.write("A child is kept only if they have data on BOTH the pre (baseline) side and the post (endline) side.")
+    pre_mode = st.session_state.get("analysis_mode") == "pre"
+    if pre_mode:
+        st.subheader("Step 3: Keep children with pre (baseline) data")
+        st.write("For a Pre analysis there is no pairing. Every child who has baseline (pre) data is kept \u2014 "
+                 "whether or not they also have post data. Only records with no pre data at all are dropped.")
+    else:
+        st.subheader("Step 3: Pair pre/post and drop unpaired children")
+        st.write("A child is kept only if they have data on BOTH the pre (baseline) side and the post (endline) side.")
 
     source_df = st.session_state.mapped_df.copy() if st.session_state.mapped_df is not None else None
     if source_df is None or len(source_df) == 0:
@@ -2155,55 +2161,59 @@ elif st.session_state.step == 3:
 
     has_pre = _side_has_data(base_cols)
     has_post = _side_has_data(end_cols)
-    if st.session_state.get("analysis_mode") == "pre":
-        paired_mask = has_pre
-    else:
-        paired_mask = has_pre & has_post
+    paired_mask = has_pre if pre_mode else (has_pre & has_post)
 
     total = int(len(source_df))
     kept = int(paired_mask.sum())
-    only_pre = int((has_pre & ~has_post).sum())
-    only_post = int((~has_pre & has_post).sum())
-    neither = int((~has_pre & ~has_post).sum())
-
+    dropped = total - kept
     id_col = "caseid" if "caseid" in source_df.columns else None
-    st.info(
-        f"Out of **{total}** child record(s), **{kept}** have BOTH pre and post and will be kept. "
-        f"**{total - kept}** will be dropped."
-    )
-    reason_rows = []
-    if only_pre:
-        reason_rows.append({"Reason": "Has pre only (no post)", "Children": only_pre})
-    if only_post:
-        reason_rows.append({"Reason": "Has post only (no pre)", "Children": only_post})
-    if neither:
-        reason_rows.append({"Reason": "No pre and no post data", "Children": neither})
-    if reason_rows:
-        st.dataframe(pd.DataFrame(reason_rows), hide_index=True, use_container_width=True)
+    show_cols = [c for c in [id_col, "d_childs_full_name", "e_childs_sex", "f_childs_age", "teacher_location"]
+                 if c and c in source_df.columns]
 
-    # Records that had data on exactly one side (a real assessment missing its pre or post).
-    # Fully-empty records (no pre and no post) are dropped silently and only counted above.
-    partial_mask = (has_pre != has_post)
-    partial_df = source_df.loc[partial_mask].copy()
-    if len(partial_df) > 0:
-        with st.expander(f"Show {len(partial_df)} record(s) dropped for missing one side (pre or post)"):
-            show_cols = [c for c in [id_col, "d_childs_full_name", "e_childs_sex", "f_childs_age", "teacher_location"] if c and c in partial_df.columns]
-            disp = partial_df[show_cols].copy() if show_cols else partial_df.iloc[:, :4].copy()
-            disp["has pre?"] = has_pre.loc[partial_df.index].map({True: "yes", False: "no"}).values
-            disp["has post?"] = has_post.loc[partial_df.index].map({True: "yes", False: "no"}).values
-            st.dataframe(disp, hide_index=True, use_container_width=True)
-    elif (total - kept) > 0:
-        st.caption("All dropped records simply had no data on either side; nothing to review individually.")
+    if pre_mode:
+        st.info(f"Out of **{total}** child record(s), **{kept}** have pre (baseline) data and will be kept. "
+                f"**{dropped}** have no pre data and will be dropped.")
+        drop_mask = ~has_pre
+        drop_df = source_df.loc[drop_mask].copy()
+        if len(drop_df) > 0:
+            with st.expander(f"Show {len(drop_df)} record(s) dropped (no pre data)"):
+                disp = drop_df[show_cols].copy() if show_cols else drop_df.iloc[:, :4].copy()
+                st.dataframe(disp, hide_index=True, use_container_width=True)
+    else:
+        only_pre = int((has_pre & ~has_post).sum())
+        only_post = int((~has_pre & has_post).sum())
+        neither = int((~has_pre & ~has_post).sum())
+        st.info(f"Out of **{total}** child record(s), **{kept}** have BOTH pre and post and will be kept. "
+                f"**{dropped}** will be dropped.")
+        reason_rows = []
+        if only_pre:
+            reason_rows.append({"Reason": "Has pre only (no post)", "Children": only_pre})
+        if only_post:
+            reason_rows.append({"Reason": "Has post only (no pre)", "Children": only_post})
+        if neither:
+            reason_rows.append({"Reason": "No pre and no post data", "Children": neither})
+        if reason_rows:
+            st.dataframe(pd.DataFrame(reason_rows), hide_index=True, use_container_width=True)
+        partial_mask = (has_pre != has_post)
+        partial_df = source_df.loc[partial_mask].copy()
+        if len(partial_df) > 0:
+            with st.expander(f"Show {len(partial_df)} record(s) dropped for missing one side (pre or post)"):
+                disp = partial_df[show_cols].copy() if show_cols else partial_df.iloc[:, :4].copy()
+                disp["has pre?"] = has_pre.loc[partial_df.index].map({True: "yes", False: "no"}).values
+                disp["has post?"] = has_post.loc[partial_df.index].map({True: "yes", False: "no"}).values
+                st.dataframe(disp, hide_index=True, use_container_width=True)
+        elif dropped > 0:
+            st.caption("All dropped records simply had no data on either side; nothing to review individually.")
 
     paired_df = source_df.loc[paired_mask].copy()
     st.session_state.paired_df = paired_df
-    st.session_state.pairing_summary = {
-        "total": total, "kept": kept, "only_pre": only_pre,
-        "only_post": only_post, "neither": neither,
-    }
+    st.session_state.pairing_summary = {"total": total, "kept": kept}
 
     if kept == 0:
-        st.error("No child has both pre and post. Check your column mapping (case ID and the post/endline question columns).")
+        if pre_mode:
+            st.error("No child has pre (baseline) data. Check your Step 2 mapping of the baseline question columns.")
+        else:
+            st.error("No child has both pre and post. Check your column mapping (case ID and the post/endline question columns).")
 
     c1, c2 = st.columns(2)
     with c1:
@@ -2211,7 +2221,7 @@ elif st.session_state.step == 3:
             go_back()
     with c2:
         if kept > 0 and st.button("Next: Score text values", type="primary"):
-            # Re-scoring / re-review must start fresh from the newly paired set.
+            # Re-scoring / re-review must start fresh from the newly kept set.
             st.session_state.scored_df = None
             st.session_state.filtered_df = None
             st.session_state.clean_base = None
