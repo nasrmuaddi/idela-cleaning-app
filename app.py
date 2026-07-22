@@ -1307,7 +1307,7 @@ def rowlevel_domains(clean_df, item_mapping=None, domain_mapping=None, max_score
     return df, n_stat
 
 
-def write_new_workbook(raw_df, cleaned_df, q_df, i_df, d_df, rq=None, ri=None, rd=None, pre_only=False) -> bytes:
+def write_new_workbook(raw_df, cleaned_df, q_df, i_df, d_df, rq=None, ri=None, rd=None, pre_only=False, dropped_rows=None, question_actions=None) -> bytes:
     """Cohort sheets (Question/Item/Domain) plus per-child row-level sheets with AVERAGE/MIN/MAX rows.
     For pre-only analysis there are no Post/change columns and no t-test."""
     out = io.BytesIO()
@@ -1400,6 +1400,10 @@ def write_new_workbook(raw_df, cleaned_df, q_df, i_df, d_df, rq=None, ri=None, r
 
         dump_plain("raw data", raw_df)
         dump_plain("Cleaned data", cleaned_df)
+        if dropped_rows is not None and len(dropped_rows) > 0:
+            dump_plain("Dropped rows", dropped_rows)
+        if question_actions is not None and len(question_actions) > 0:
+            dump_plain("Question actions", question_actions)
 
         zebra = [RESTFUL_COLORS["slate_blue"]["light"], RESTFUL_COLORS["sage_green"]["light"]]
         dump_colored("Question Analysis", q_df, [(zebra[i % 2], False) for i in range(len(q_df))])
@@ -1485,7 +1489,7 @@ def write_new_workbook(raw_df, cleaned_df, q_df, i_df, d_df, rq=None, ri=None, r
                         pL = xl_col_to_name(rd_cols.index(pre_name))
                         qL = xl_col_to_name(rd_cols.index(post_name))
                         r1, r2 = rng
-                        formula = f"=_xlfn.T.TEST('{PC}'!{pL}{r1}:{pL}{r2},'{PC}'!{qL}{r1}:{qL}{r2},2,1)"
+                        formula = f"=TTEST('{PC}'!{pL}{r1}:{pL}{r2},'{PC}'!{qL}{r1}:{qL}{r2},2,1)"
                         dws.write_formula(i + 1, cj, formula, tfmt(bg, bold))
                     else:
                         dws.write(i + 1, cj, "n/a", cell_fmt(bg, "text", bold))
@@ -1547,9 +1551,129 @@ def write_new_workbook(raw_df, cleaned_df, q_df, i_df, d_df, rq=None, ri=None, r
                     for pn, qn in pairs:
                         pL, qL = _xlc(cols2.index(pn)), _xlc(cols2.index(qn))
                         r1, r2 = rng
-                        f = f"=_xlfn.T.TEST({pL}{r1}:{pL}{r2},{qL}{r1}:{qL}{r2},2,1)"
+                        f = f"=TTEST({pL}{r1}:{pL}{r2},{qL}{r1}:{qL}{r2},2,1)"
                         dws2.write_formula(wrow, cols2.index(qn), f, tfmt2)
     return out.getvalue()
+
+
+def build_analysis_pdf(clean_df, max_scores, item_mapping, domain_mapping, pre_only):
+    """Multi-page PDF: overall IDELA + domain scores, then a page per demographic breakdown
+    (gender, age group, residency status, governorate, nationality, sector)."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.backends.backend_pdf import PdfPages
+    import numpy as np
+
+    domains = list(domain_mapping.keys())
+    metrics = domains + ["IDELA"]
+
+    def summary_for(sub):
+        qd = analysis_by_question(sub, max_scores, pre_only=pre_only)
+        dd = analysis_by_domain(qd, item_mapping, domain_mapping, pre_only=pre_only)
+        pre, post = {}, {}
+        for _, r in dd.iterrows():
+            name = "IDELA" if str(r["Domain"]).startswith("IDELA") else r["Domain"]
+            pre[name] = float(r.get("Pre %", 0) or 0)
+            if not pre_only:
+                post[name] = float(r.get("Post %", 0) or 0)
+        return pre, post
+
+    def age_cat(v):
+        try:
+            x = float(v)
+        except Exception:
+            return "Unknown"
+        if x <= 2:
+            return "0-2"
+        if x <= 6:
+            return "3-6"
+        if x <= 8:
+            return "7-8"
+        return "Other"
+
+    def firstcol(cands):
+        for c in cands:
+            if c in clean_df.columns:
+                return c
+        return None
+
+    buf = io.BytesIO()
+    with PdfPages(buf) as pdf:
+        # ---- Title / overall ----
+        fig = plt.figure(figsize=(8.27, 11.69))
+        fig.suptitle("IDELA Analysis Report", fontsize=20, y=0.96)
+        ax = fig.add_subplot(111)
+        ax.axis("off")
+        pre, post = summary_for(clean_df)
+        lines = [f"Total children analysed: {len(clean_df)}",
+                 f"Analysis type: {'Pre only' if pre_only else 'Pre and Post'}", "",
+                 "Overall scores", "----------------"]
+        for mlab in metrics:
+            if pre_only:
+                lines.append(f"{mlab:<28} {pre.get(mlab, 0):6.1f}%")
+            else:
+                dlt = post.get(mlab, 0) - pre.get(mlab, 0)
+                lines.append(f"{mlab:<22} pre {pre.get(mlab,0):5.1f}%  post {post.get(mlab,0):5.1f}%  ({dlt:+.1f})")
+        ax.text(0.06, 0.88, "\n".join(lines), va="top", ha="left", fontsize=11, family="monospace")
+        pdf.savefig(fig)
+        plt.close(fig)
+
+        dims = [
+            ("Gender", "e_childs_sex", None),
+            ("Age group", "f_childs_age", "age"),
+            ("Residency status", firstcol(["residency_status", "residency", "refugee_status", "status"]), None),
+            ("Governorate", firstcol(["governorate", "governerate", "gov"]), None),
+            ("Nationality", firstcol(["nationality", "nationalities"]), None),
+            ("Sector", firstcol(["sector", "sectors"]), None),
+        ]
+        for label, col, kind in dims:
+            if not col or col not in clean_df.columns:
+                continue
+            if kind == "age":
+                cats = clean_df[col].map(age_cat)
+            else:
+                cats = clean_df[col].astype("string").fillna("Unknown").replace("", "Unknown")
+            groups = []
+            for cat, sub in clean_df.groupby(cats):
+                if len(sub) == 0:
+                    continue
+                pre_s, post_s = summary_for(sub)
+                groups.append((str(cat), len(sub), pre_s, post_s))
+            if not groups:
+                continue
+            groups.sort(key=lambda g: g[0])
+
+            fig = plt.figure(figsize=(8.27, 11.69))
+            fig.suptitle(f"By {label}", fontsize=16, y=0.97)
+            ax1 = fig.add_axes([0.10, 0.56, 0.85, 0.33])
+            x = np.arange(len(groups))
+            w = 0.8 / max(1, len(metrics))
+            for mi, mlab in enumerate(metrics):
+                ax1.bar(x + mi * w, [g[2].get(mlab, 0) for g in groups], w, label=mlab)
+            ax1.set_xticks(x + 0.4 - w / 2)
+            ax1.set_xticklabels([f"{g[0]}\n(n={g[1]})" for g in groups], fontsize=8)
+            ax1.set_ylabel("Pre %")
+            ax1.set_ylim(0, 100)
+            ax1.set_title("Pre % by " + label, fontsize=10)
+            ax1.legend(fontsize=7, ncol=len(metrics), loc="upper center", bbox_to_anchor=(0.5, -0.14))
+
+            ax2 = fig.add_axes([0.04, 0.05, 0.92, 0.42])
+            ax2.axis("off")
+            col_labels = ["Category", "n"] + metrics + ([f"{mm} post" for mm in metrics] if not pre_only else [])
+            table_rows = []
+            for cat, n, pre_s, post_s in groups:
+                row = [cat, str(n)] + [f"{pre_s.get(mm, 0):.1f}" for mm in metrics]
+                if not pre_only:
+                    row += [f"{post_s.get(mm, 0):.1f}" for mm in metrics]
+                table_rows.append(row)
+            tbl = ax2.table(cellText=table_rows, colLabels=col_labels, loc="upper center", cellLoc="center")
+            tbl.auto_set_font_size(False)
+            tbl.set_fontsize(6)
+            tbl.scale(1, 1.3)
+            pdf.savefig(fig)
+            plt.close(fig)
+    return buf.getvalue()
 
 
 def to_excel_bytes(sheets: Dict[str, pd.DataFrame]) -> bytes:
@@ -1868,15 +1992,11 @@ def build_duplicated_rows_df(raw_df: pd.DataFrame, mapping: Dict[str, str], base
     return keep_standard_columns(merged)
 
 
-def save_checkpoint_bytes():
-    """Full snapshot of the current session as a real .xlsx: one visible sheet with the missing %
-    relevant to where you paused, plus hidden sheets carrying the complete state so a 'Continue'
-    run resumes at exactly this point with all work (deletions, actions) intact."""
-    import json
+def save_quality_check_xlsx():
+    """Editable Excel for the field team: each child's row and each question with its missing %.
+    No hidden state — this is the file they do data-quality checks on."""
     ss = st.session_state
     pre_mode = ss.get("analysis_mode") == "pre"
-    step = int(ss.get("step", 8))
-
     src = ss.get("clean_base")
     if src is None:
         src = ss.get("scored_df")
@@ -1886,15 +2006,15 @@ def save_checkpoint_bytes():
         src = ss.get("mapped_df")
     if src is None:
         row_visible = pd.DataFrame({"info": ["No data available"]})
+        question_visible = pd.DataFrame({"info": ["No data available"]})
     else:
-        keep = [c for c in ["caseid", "d_childs_full_name", "child_name", "student_name",
-                            "e_childs_sex", "f_childs_age", "teacher_location"] if c in src.columns]
+        keep = [c for c in ["caseid", "d_childs_full_name", "e_childs_sex", "f_childs_age", "teacher_location"]
+                if c in src.columns]
         row_visible = src[keep].copy() if keep else pd.DataFrame(index=range(len(src)))
         row_visible["missing % (pre)"] = (missing_pct(src, BASELINE_QUESTION_COLS) * 100).round(1).values
         if not pre_mode and any(c in src.columns for c in ENDLINE_QUESTION_COLS):
             row_visible["missing % (post)"] = (missing_pct(src, ENDLINE_QUESTION_COLS) * 100).round(1).values
-    qrows = []
-    if src is not None:
+        qrows = []
         for base_col in BASELINE_QUESTION_COLS:
             if base_col not in src.columns:
                 continue
@@ -1905,75 +2025,73 @@ def save_checkpoint_bytes():
             if not pre_mode:
                 r["missing % (post)"] = round(question_missing_pct(src, f"{base_col}_post") * 100, 1)
             qrows.append(r)
-    question_visible = pd.DataFrame(qrows) if qrows else pd.DataFrame({"info": ["No questions"]})
+        question_visible = pd.DataFrame(qrows) if qrows else pd.DataFrame({"info": ["No questions"]})
+    out = io.BytesIO()
+    with pd.ExcelWriter(out, engine="xlsxwriter") as writer:
+        row_visible.to_excel(writer, sheet_name="Rows to verify", index=False)
+        question_visible.to_excel(writer, sheet_name="Questions to verify", index=False)
+    return out.getvalue()
 
+
+def save_resume_bytes():
+    """Opaque, non-editable resume file (gzip-compressed JSON) carrying the full session state.
+    Re-upload it under a 'Continue' mode to resume at exactly this point."""
+    import json, gzip
+    ss = st.session_state
+    keys_df = ["mapped_df", "paired_df", "scored_df", "filtered_df", "clean_base", "download_raw_df"]
     sdi = []
     for i in (ss.get("selected_delete_indices") or set()):
         try:
             sdi.append(int(i))
         except Exception:
             sdi.append(str(i))
-    state = {
-        "step": step,
+    payload = {
+        "step": int(ss.get("step", 8)),
         "analysis_mode": ss.get("analysis_mode"),
+        "review_phase": ss.get("review_phase", "row"),
         "item_mapping": ss.get("item_mapping") or {},
         "domain_mapping": ss.get("domain_mapping") or {},
         "max_scores": ss.get("max_scores") or {},
         "actions": ss.get("actions") or {},
+        "comments": ss.get("comments") or {},
         "value_recode_mapping": ss.get("value_recode_mapping") or {},
         "selected_delete_indices": sdi,
         "rows_applied": bool(ss.get("rows_applied")),
         "qa_ready": bool(ss.get("qa_ready")),
         "qi_applied": bool(ss.get("qi_applied", True)),
         "di_applied": bool(ss.get("di_applied", True)),
-        "review_phase": ss.get("review_phase", "row"),
-        "comments": ss.get("comments") or {},
+        "dataframes": {k: ss.get(k).to_json(orient="split") for k in keys_df if ss.get(k) is not None},
     }
-
-    out = io.BytesIO()
-    with pd.ExcelWriter(out, engine="xlsxwriter") as writer:
-        row_visible.to_excel(writer, sheet_name="Missing % per row", index=False)
-        question_visible.to_excel(writer, sheet_name="Missing % per question", index=False)
-        pd.DataFrame({"json": [json.dumps(state)]}).to_excel(writer, sheet_name="_state", index=False)
-        writer.sheets["_state"].hide()
-        for key in ["mapped_df", "paired_df", "scored_df", "filtered_df", "clean_base", "download_raw_df"]:
-            dfk = ss.get(key)
-            if dfk is not None and hasattr(dfk, "to_excel"):
-                sh = f"_df_{key}"[:31]
-                dfk.to_excel(writer, sheet_name=sh, index=True)
-                writer.sheets[sh].hide()
-    return out.getvalue()
+    return gzip.compress(json.dumps(payload).encode("utf-8"))
 
 
-def load_checkpoint(file):
-    import json
+def load_resume(file):
+    import json, gzip
     ss = st.session_state
-    xls = pd.ExcelFile(file)
-    if "_state" not in xls.sheet_names:
-        raise ValueError("This file is not an IDELA check-later file.")
-    state = json.loads(pd.read_excel(xls, "_state")["json"].iloc[0])
-    ss["analysis_mode"] = state.get("analysis_mode")
-    ss["item_mapping"] = {str(k): v for k, v in (state.get("item_mapping") or {}).items()}
-    ss["domain_mapping"] = {k: list(v) for k, v in (state.get("domain_mapping") or {}).items()}
-    ss["max_scores"] = {str(k): float(v) for k, v in (state.get("max_scores") or {}).items()}
-    ss["actions"] = dict(state.get("actions") or {})
-    ss["value_recode_mapping"] = dict(state.get("value_recode_mapping") or {})
-    for key in ["mapped_df", "paired_df", "scored_df", "filtered_df", "clean_base", "download_raw_df"]:
-        sh = f"_df_{key}"[:31]
-        if sh in xls.sheet_names:
-            ss[key] = pd.read_excel(xls, sh, index_col=0)
-    ss["selected_delete_indices"] = set(state.get("selected_delete_indices") or [])
-    ss["rows_applied"] = bool(state.get("rows_applied"))
-    ss["qa_ready"] = bool(state.get("qa_ready"))
-    ss["qi_applied"] = bool(state.get("qi_applied", True))
-    ss["di_applied"] = bool(state.get("di_applied", True))
-    ss["review_phase"] = state.get("review_phase", "row")
-    ss["comments"] = dict(state.get("comments") or {})
+    raw = file.read() if hasattr(file, "read") else file
+    try:
+        payload = json.loads(gzip.decompress(raw).decode("utf-8"))
+    except Exception:
+        raise ValueError("This is not a valid IDELA resume file.")
+    ss["analysis_mode"] = payload.get("analysis_mode")
+    ss["review_phase"] = payload.get("review_phase", "row")
+    ss["item_mapping"] = {str(k): v for k, v in (payload.get("item_mapping") or {}).items()}
+    ss["domain_mapping"] = {k: list(v) for k, v in (payload.get("domain_mapping") or {}).items()}
+    ss["max_scores"] = {str(k): float(v) for k, v in (payload.get("max_scores") or {}).items()}
+    ss["actions"] = dict(payload.get("actions") or {})
+    ss["comments"] = dict(payload.get("comments") or {})
+    ss["value_recode_mapping"] = dict(payload.get("value_recode_mapping") or {})
+    ss["selected_delete_indices"] = set(payload.get("selected_delete_indices") or [])
+    ss["rows_applied"] = bool(payload.get("rows_applied"))
+    ss["qa_ready"] = bool(payload.get("qa_ready"))
+    ss["qi_applied"] = bool(payload.get("qi_applied", True))
+    ss["di_applied"] = bool(payload.get("di_applied", True))
     ss["confirm_back_row"] = False
-    step = int(state.get("step", 8))
+    for k, js in (payload.get("dataframes") or {}).items():
+        ss[k] = pd.read_json(io.StringIO(js), orient="split")
+    step = int(payload.get("step", 8))
     ss["step"] = step
-    ss["_last_step"] = step  # keep restored flags; block the fresh-arrival reset
-
+    ss["_last_step"] = step
 
 init_state()
 
@@ -2000,10 +2118,10 @@ if st.session_state.get("analysis_mode") is None:
                 st.rerun()
         else:
             st.caption("Upload the check-later file you saved earlier to continue exactly where you left off.")
-            up = st.file_uploader("Upload check-later file (.xlsx)", type=["xlsx"], key="ckpt_up")
+            up = st.file_uploader("Upload your resume file (.idela)", type=["idela"], key="ckpt_up")
             if up is not None:
                 try:
-                    load_checkpoint(up)
+                    load_resume(up)
                     st.success("Session restored. Continuing where you left off.")
                     st.rerun()
                 except Exception as e:
@@ -2497,10 +2615,16 @@ elif st.session_state.step == 8:
                 qrows.append(r)
             st.markdown("**Questions (columns) — missing %**")
             st.dataframe(pd.DataFrame(qrows), hide_index=True, use_container_width=True, height=240)
-        st.download_button("Download check-later file", data=save_checkpoint_bytes(),
-                           file_name="idela_checklater.xlsx",
-                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                           type="primary")
+        dlc1, dlc2 = st.columns(2)
+        with dlc1:
+            st.download_button("1) Download quality-check Excel", data=save_quality_check_xlsx(),
+                               file_name="idela_quality_check.xlsx",
+                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+            st.caption("Give this to the field team — they review each row and question's missing % here.")
+        with dlc2:
+            st.download_button("2) Download resume file (do not edit)", data=save_resume_bytes(),
+                               file_name="idela_resume.idela", mime="application/octet-stream", type="primary")
+            st.caption("Keep this safe. Re-upload it under a Continue mode to pick up exactly here.")
         if st.button("Back"):
             go_back()
         st.stop()
@@ -2510,7 +2634,7 @@ elif st.session_state.step == 8:
 
     # ===== PHASE 1: ROW VALIDATION =====
     if phase == "row":
-        st.markdown("#### 1) Row validation")
+        st.markdown("#### 1) Review child cases (by row)")
         src = (st.session_state.scored_df.copy() if st.session_state.get("scored_df") is not None
                else (st.session_state.paired_df.copy() if st.session_state.get("paired_df") is not None
                      else st.session_state.mapped_df.copy()))
@@ -2612,7 +2736,7 @@ elif st.session_state.step == 8:
             st.session_state.confirm_back_row = True
             st.rerun()
 
-    st.markdown("#### 2) Column (question) analysis")
+    st.markdown("#### 2) Review questions across all children (by column)")
     st.caption("Choose an action per question. Questions with **0% missing** are locked to **no change** "
                "(comment defaults to 'normal', not required). **change missing to 0** and **drop this question** "
                "each need a comment.")
@@ -2978,7 +3102,29 @@ elif st.session_state.step == 9:
         rq = rowlevel_questions(clean_df, max_scores, pre_only=pre_only)
         ri = rowlevel_items(clean_df, item_mapping, max_scores, pre_only=pre_only)
         rd = rowlevel_domains(clean_df, item_mapping, domain_mapping, max_scores, pre_only=pre_only)
-        excel_bytes = write_new_workbook(raw_sheet, cleaned_sheet, q_df, i_df, d_df, rq, ri, rd, pre_only=pre_only)
+        scored_full = st.session_state.get("scored_df")
+        dropped_rows_df = None
+        if scored_full is not None:
+            drp = scored_full.loc[~scored_full.index.isin(set(clean_base.index))]
+            if len(drp) > 0:
+                keepc = [c for c in ["caseid", "d_childs_full_name", "e_childs_sex", "f_childs_age", "teacher_location"]
+                         if c in drp.columns]
+                dropped_rows_df = drp[keepc].copy() if keepc else pd.DataFrame(index=range(len(drp)))
+                dropped_rows_df["pre missing %"] = (missing_pct(drp, BASELINE_QUESTION_COLS) * 100).round(1).values
+                if not pre_only:
+                    dropped_rows_df["post missing %"] = (missing_pct(drp, ENDLINE_QUESTION_COLS) * 100).round(1).values
+        comments = st.session_state.get("comments") or {}
+        qa_rows = []
+        for qid, act in (actions or {}).items():
+            if act == "no change":
+                continue
+            lab = QUESTION_LABELS.get(qid, qid)
+            eng = lab.split(" | ", 1)[1].strip() if " | " in lab else str(lab)
+            qa_rows.append({"Question ID": qid, "Question": eng, "Action": act, "Comment": comments.get(qid, "")})
+        question_actions_df = pd.DataFrame(qa_rows) if qa_rows else None
+        excel_bytes = write_new_workbook(raw_sheet, cleaned_sheet, q_df, i_df, d_df, rq, ri, rd,
+                                         pre_only=pre_only, dropped_rows=dropped_rows_df,
+                                         question_actions=question_actions_df)
         st.success("Workbook ready: raw data, cleaned data, and question / item / domain analysis.")
         st.download_button(
             label="Download IDELA analysis workbook",
@@ -2987,6 +3133,18 @@ elif st.session_state.step == 9:
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             type="primary",
         )
+        try:
+            pdf_bytes = build_analysis_pdf(clean_df, max_scores, item_mapping, domain_mapping, pre_only)
+            st.download_button(
+                label="Download analysis report (PDF)",
+                data=pdf_bytes,
+                file_name="idela_analysis_report.pdf",
+                mime="application/pdf",
+            )
+            st.caption("The PDF breaks down IDELA and domain scores by gender, age group, residency, "
+                       "governorate, nationality and sector (whichever columns exist in your data).")
+        except Exception as e:
+            st.warning(f"Could not build the PDF report ({e}). The Excel workbook above is unaffected.")
 
     if st.button("Back"):
         go_back()
