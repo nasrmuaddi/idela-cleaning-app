@@ -333,6 +333,9 @@ def init_state():
         "di_applied": False,
         "rows_applied": False,
         "analysis_mode": None,
+        "review_phase": "row",
+        "comments": {},
+        "confirm_back_row": False,
         "value_recode_mapping": {},
         "actions": {},
         "selected_delete_indices": set(),
@@ -1579,7 +1582,7 @@ def go_back():
 
 STEP_LABELS = ["1. Upload", "2. Map Columns", "3. Pair Pre/Post", "4. Score Text",
                "5. Questions→Items", "6. Max Scores", "7. Items→Domains",
-               "8. Review Rows", "9. Question Actions", "10. Download"]
+               "8. Review & Clean", "9. Download"]
 
 
 def show_progress():
@@ -1874,39 +1877,35 @@ def save_checkpoint_bytes():
     pre_mode = ss.get("analysis_mode") == "pre"
     step = int(ss.get("step", 8))
 
-    if step >= 9 and ss.get("clean_base") is not None:
-        cb = ss["clean_base"]
-        rows = []
+    src = ss.get("clean_base")
+    if src is None:
+        src = ss.get("scored_df")
+    if src is None:
+        src = ss.get("paired_df")
+    if src is None:
+        src = ss.get("mapped_df")
+    if src is None:
+        row_visible = pd.DataFrame({"info": ["No data available"]})
+    else:
+        keep = [c for c in ["caseid", "d_childs_full_name", "child_name", "student_name",
+                            "e_childs_sex", "f_childs_age", "teacher_location"] if c in src.columns]
+        row_visible = src[keep].copy() if keep else pd.DataFrame(index=range(len(src)))
+        row_visible["missing % (pre)"] = (missing_pct(src, BASELINE_QUESTION_COLS) * 100).round(1).values
+        if not pre_mode and any(c in src.columns for c in ENDLINE_QUESTION_COLS):
+            row_visible["missing % (post)"] = (missing_pct(src, ENDLINE_QUESTION_COLS) * 100).round(1).values
+    qrows = []
+    if src is not None:
         for base_col in BASELINE_QUESTION_COLS:
-            if base_col not in cb.columns:
+            if base_col not in src.columns:
                 continue
             lab = QUESTION_LABELS.get(base_col, base_col)
             eng = lab.split(" | ", 1)[1].strip() if " | " in lab else str(lab)
-            row = {"Question ID": base_col, "Question": eng,
-                   "missing % (pre)": round(question_missing_pct(cb, base_col) * 100, 1)}
+            r = {"Question ID": base_col, "Question": eng,
+                 "missing % (pre)": round(question_missing_pct(src, base_col) * 100, 1)}
             if not pre_mode:
-                row["missing % (post)"] = round(question_missing_pct(cb, f"{base_col}_post") * 100, 1)
-            rows.append(row)
-        visible = pd.DataFrame(rows) if rows else pd.DataFrame({"info": ["No questions"]})
-        vis_name = "Missing % per question"
-    else:
-        src = ss.get("clean_base")
-        if src is None:
-            src = ss.get("scored_df")
-        if src is None:
-            src = ss.get("paired_df")
-        if src is None:
-            src = ss.get("mapped_df")
-        if src is None:
-            visible = pd.DataFrame({"info": ["No data available"]})
-        else:
-            keep = [c for c in ["caseid", "d_childs_full_name", "child_name", "student_name",
-                                "e_childs_sex", "f_childs_age", "teacher_location"] if c in src.columns]
-            visible = src[keep].copy() if keep else pd.DataFrame(index=range(len(src)))
-            visible["missing % (pre)"] = (missing_pct(src, BASELINE_QUESTION_COLS) * 100).round(1).values
-            if not pre_mode and any(c in src.columns for c in ENDLINE_QUESTION_COLS):
-                visible["missing % (post)"] = (missing_pct(src, ENDLINE_QUESTION_COLS) * 100).round(1).values
-        vis_name = "Missing % per row"
+                r["missing % (post)"] = round(question_missing_pct(src, f"{base_col}_post") * 100, 1)
+            qrows.append(r)
+    question_visible = pd.DataFrame(qrows) if qrows else pd.DataFrame({"info": ["No questions"]})
 
     sdi = []
     for i in (ss.get("selected_delete_indices") or set()):
@@ -1927,11 +1926,14 @@ def save_checkpoint_bytes():
         "qa_ready": bool(ss.get("qa_ready")),
         "qi_applied": bool(ss.get("qi_applied", True)),
         "di_applied": bool(ss.get("di_applied", True)),
+        "review_phase": ss.get("review_phase", "row"),
+        "comments": ss.get("comments") or {},
     }
 
     out = io.BytesIO()
     with pd.ExcelWriter(out, engine="xlsxwriter") as writer:
-        visible.to_excel(writer, sheet_name=vis_name[:31], index=False)
+        row_visible.to_excel(writer, sheet_name="Missing % per row", index=False)
+        question_visible.to_excel(writer, sheet_name="Missing % per question", index=False)
         pd.DataFrame({"json": [json.dumps(state)]}).to_excel(writer, sheet_name="_state", index=False)
         writer.sheets["_state"].hide()
         for key in ["mapped_df", "paired_df", "scored_df", "filtered_df", "clean_base", "download_raw_df"]:
@@ -1965,6 +1967,9 @@ def load_checkpoint(file):
     ss["qa_ready"] = bool(state.get("qa_ready"))
     ss["qi_applied"] = bool(state.get("qi_applied", True))
     ss["di_applied"] = bool(state.get("di_applied", True))
+    ss["review_phase"] = state.get("review_phase", "row")
+    ss["comments"] = dict(state.get("comments") or {})
+    ss["confirm_back_row"] = False
     step = int(state.get("step", 8))
     ss["step"] = step
     ss["_last_step"] = step  # keep restored flags; block the fresh-arrival reset
@@ -2447,199 +2452,282 @@ elif st.session_state.step == 4:
 # STEP 8: Row review
 elif st.session_state.step == 8:
     pre_mode = st.session_state.get("analysis_mode") == "pre"
-    st.subheader("Step 8: Review rows with high missing percentage")
-    if st.session_state.get("_last_step") != 8:
+    st.subheader("Step 8: Review & clean")
+
+    # Fresh forward arrival (from an earlier step) resets phases; coming back from Download
+    # or resuming a checkpoint preserves what was done.
+    _ls = st.session_state.get("_last_step")
+    if _ls is not None and _ls < 8:
+        st.session_state.review_phase = "row"
         st.session_state.rows_applied = False
-    with st.expander("Pause & continue later (save a check-later file)"):
-        st.caption("Saves everything you've done so far \u2014 including deletions/actions you've applied \u2014 "
-                   "as one file. It shows the missing % for the field team to review; all working data is hidden. "
-                   "To resume, reopen the app, pick the matching **Continue** mode, and upload this file: you land back here exactly.")
+        st.session_state.qa_ready = False
+        st.session_state.confirm_back_row = False
+
+    review_choice = st.radio(
+        "What would you like to do?",
+        ["Perform review now", "Pause & continue later (save a check-later file)"],
+        key="review_choice", horizontal=True)
+
+    # ---------------- PAUSE: view-only info + one combined check-later file ----------------
+    if review_choice.startswith("Pause"):
+        st.info("This saves everything you've done so far as one file. The field team can open it to review "
+                "each child's row and each question's missing %, then discuss before deciding. To resume, reopen "
+                "the app, pick the matching **Continue** mode, and upload this file — you land back here exactly.")
+        src = (st.session_state.get("clean_base") if st.session_state.get("clean_base") is not None
+               else (st.session_state.get("scored_df") if st.session_state.get("scored_df") is not None
+                     else st.session_state.get("paired_df")))
+        if src is not None:
+            keep = [c for c in ["caseid", "d_childs_full_name", "e_childs_sex", "f_childs_age", "teacher_location"]
+                    if c in src.columns]
+            rv = src[keep].copy() if keep else pd.DataFrame(index=range(len(src)))
+            rv["missing % (pre)"] = (missing_pct(src, BASELINE_QUESTION_COLS) * 100).round(1).values
+            if not pre_mode:
+                rv["missing % (post)"] = (missing_pct(src, ENDLINE_QUESTION_COLS) * 100).round(1).values
+            st.markdown("**Rows (children) — missing %**")
+            st.dataframe(rv, hide_index=True, use_container_width=True, height=240)
+            qrows = []
+            for base_col in BASELINE_QUESTION_COLS:
+                if base_col not in src.columns:
+                    continue
+                lab = QUESTION_LABELS.get(base_col, base_col)
+                eng = lab.split(" | ", 1)[1].strip() if " | " in lab else str(lab)
+                r = {"Question": f"{base_col} — {eng}", "missing % (pre)": round(question_missing_pct(src, base_col) * 100, 1)}
+                if not pre_mode:
+                    r["missing % (post)"] = round(question_missing_pct(src, f"{base_col}_post") * 100, 1)
+                qrows.append(r)
+            st.markdown("**Questions (columns) — missing %**")
+            st.dataframe(pd.DataFrame(qrows), hide_index=True, use_container_width=True, height=240)
         st.download_button("Download check-later file", data=save_checkpoint_bytes(),
                            file_name="idela_checklater.xlsx",
-                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-
-    src = (st.session_state.scored_df.copy() if st.session_state.get("scored_df") is not None
-           else (st.session_state.paired_df.copy() if st.session_state.get("paired_df") is not None
-                 else st.session_state.mapped_df.copy()))
-    filtered_df = src.copy()
-    filtered_df.insert(0, "pre missing %", missing_pct(filtered_df, BASELINE_QUESTION_COLS))
-    if not pre_mode:
-        filtered_df.insert(1, "post missing %", missing_pct(filtered_df, ENDLINE_QUESTION_COLS))
-    st.session_state.filtered_df = filtered_df
-    pct_cols_all = ["pre missing %"] + ([] if pre_mode else ["post missing %"])
-
-    st.write(f"Rows to review: **{len(filtered_df)}**")
-    if pre_mode:
-        high = filtered_df[filtered_df["pre missing %"] > 0.30].copy()
-        st.warning(f"Rows with pre missing above 30%: {len(high)}")
-    else:
-        high = filtered_df[(filtered_df["pre missing %"] > 0.30) | (filtered_df["post missing %"] > 0.30)].copy()
-        st.warning(f"Rows with pre or post missing above 30%: {len(high)}")
-
-    if len(high) > 0:
-        b1, b2 = st.columns(2)
-        with b1:
-            if st.button("Select all high-missing rows"):
-                st.session_state.selected_delete_indices = set(high.index)
-                st.session_state.rows_applied = False
-                st.rerun()
-        with b2:
-            if st.button("Clear selection"):
-                st.session_state.selected_delete_indices = set()
-                st.session_state.rows_applied = False
-                st.rerun()
-
-        disp_cols = [c for c in ["caseid", "d_childs_full_name", "e_childs_sex", "f_childs_age"] if c in high.columns]
-        show = high.copy()
-        for pc in pct_cols_all:
-            show[pc] = show[pc] * 100
-        show.insert(0, "Delete?", show.index.isin(st.session_state.selected_delete_indices))
-        editor_cols = ["Delete?"] + disp_cols + pct_cols_all
-        colcfg = {
-            "Delete?": st.column_config.CheckboxColumn("Delete?"),
-            "pre missing %": st.column_config.ProgressColumn("Pre missing %", format="%.1f%%", min_value=0, max_value=100),
-        }
-        if not pre_mode:
-            colcfg["post missing %"] = st.column_config.ProgressColumn("Post missing %", format="%.1f%%", min_value=0, max_value=100)
-        st.caption("Tick the rows to delete, then click **Apply row deletions**. Ticking inside the table does not refresh the page.")
-        with st.form("rows_form", clear_on_submit=False):
-            edited_rows = st.data_editor(
-                show[editor_cols], use_container_width=True, hide_index=True, height=380,
-                column_config=colcfg, disabled=disp_cols + pct_cols_all, key="rows_editor_form")
-            applied_rows = st.form_submit_button("Apply row deletions", type="primary")
-        if applied_rows:
-            mask = list(edited_rows["Delete?"].values)
-            st.session_state.selected_delete_indices = set(high.index[mask])
-            st.session_state.rows_applied = True
-            st.rerun()
-    else:
-        st.success("No rows exceed 30% missing \u2014 nothing to delete.")
-        if not st.session_state.get("rows_applied"):
-            if st.button("Apply (keep all rows)", type="primary"):
-                st.session_state.selected_delete_indices = set()
-                st.session_state.rows_applied = True
-                st.rerun()
-
-    if st.session_state.get("rows_applied"):
-        delete_indices = [i for i in st.session_state.selected_delete_indices if i in filtered_df.index]
-        clean_base = filtered_df.drop(index=delete_indices).drop(columns=pct_cols_all, errors="ignore").copy()
-        st.session_state.clean_base = clean_base
-        st.success(f"{len(delete_indices)} row(s) will be deleted \u2014 {len(clean_base)} row(s) kept.")
-        cc1, cc2 = st.columns(2)
-        with cc1:
-            if st.button("Back"):
-                go_back()
-        with cc2:
-            if st.button("Next: Question actions", type="primary"):
-                st.session_state.actions = {}
-                st.session_state.qa_ready = False
-                go_next()
-    else:
-        st.info("Select rows (if any) and click **Apply row deletions** to continue.")
+                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                           type="primary")
         if st.button("Back"):
             go_back()
+        st.stop()
 
-# STEP 9: Question actions
-elif st.session_state.step == 9:
-    st.subheader("Step 9: Question Missing Review and Actions")
-    if st.session_state.get("_last_step") != 9:
-        st.session_state.qa_ready = False
-    with st.expander("Pause & continue later (save a check-later file)"):
-        st.caption("Saves everything you've done so far \u2014 including deletions/actions you've applied \u2014 "
-                   "as one file. It shows the missing % for the field team to review; all working data is hidden. "
-                   "To resume, reopen the app, pick the matching **Continue** mode, and upload this file: you land back here exactly.")
-        st.download_button("Download check-later file", data=save_checkpoint_bytes(),
-                           file_name="idela_checklater.xlsx",
-                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    # ---------------- REVIEW NOW ----------------
+    phase = st.session_state.get("review_phase", "row")
+
+    # ===== PHASE 1: ROW VALIDATION =====
+    if phase == "row":
+        st.markdown("#### 1) Row validation")
+        src = (st.session_state.scored_df.copy() if st.session_state.get("scored_df") is not None
+               else (st.session_state.paired_df.copy() if st.session_state.get("paired_df") is not None
+                     else st.session_state.mapped_df.copy()))
+        filtered_df = src.copy()
+        filtered_df.insert(0, "pre missing %", missing_pct(filtered_df, BASELINE_QUESTION_COLS))
+        if not pre_mode:
+            filtered_df.insert(1, "post missing %", missing_pct(filtered_df, ENDLINE_QUESTION_COLS))
+        st.session_state.filtered_df = filtered_df
+        pct_cols_all = ["pre missing %"] + ([] if pre_mode else ["post missing %"])
+
+        st.write(f"Rows to review: **{len(filtered_df)}**")
+        if pre_mode:
+            high = filtered_df[filtered_df["pre missing %"] > 0.30].copy()
+            st.warning(f"Rows with pre missing above 30%: {len(high)}")
+        else:
+            high = filtered_df[(filtered_df["pre missing %"] > 0.30) | (filtered_df["post missing %"] > 0.30)].copy()
+            st.warning(f"Rows with pre or post missing above 30%: {len(high)}")
+
+        if len(high) > 0:
+            b1, b2 = st.columns(2)
+            with b1:
+                if st.button("Select all high-missing rows"):
+                    st.session_state.selected_delete_indices = set(high.index)
+                    st.rerun()
+            with b2:
+                if st.button("Clear selection"):
+                    st.session_state.selected_delete_indices = set()
+                    st.rerun()
+            disp_cols = [c for c in ["caseid", "d_childs_full_name", "e_childs_sex", "f_childs_age"] if c in high.columns]
+            show = high.copy()
+            for pc in pct_cols_all:
+                show[pc] = show[pc] * 100
+            show.insert(0, "Delete?", show.index.isin(st.session_state.selected_delete_indices))
+            editor_cols = ["Delete?"] + disp_cols + pct_cols_all
+            colcfg = {
+                "Delete?": st.column_config.CheckboxColumn("Delete?"),
+                "pre missing %": st.column_config.ProgressColumn("Pre missing %", format="%.1f%%", min_value=0, max_value=100),
+            }
+            if not pre_mode:
+                colcfg["post missing %"] = st.column_config.ProgressColumn("Post missing %", format="%.1f%%", min_value=0, max_value=100)
+            st.caption("Tick the rows to delete, then click **Apply row validation**. Ticking inside the table does not refresh the page.")
+            with st.form("rows_form", clear_on_submit=False):
+                edited_rows = st.data_editor(
+                    show[editor_cols], use_container_width=True, hide_index=True, height=360,
+                    column_config=colcfg, disabled=disp_cols + pct_cols_all, key="rows_editor_form")
+                applied_rows = st.form_submit_button("Apply row validation", type="primary")
+            if applied_rows:
+                mask = list(edited_rows["Delete?"].values)
+                st.session_state.selected_delete_indices = set(high.index[mask])
+                delete_indices = [i for i in st.session_state.selected_delete_indices if i in filtered_df.index]
+                st.session_state.clean_base = filtered_df.drop(index=delete_indices).drop(columns=pct_cols_all, errors="ignore").copy()
+                st.session_state.rows_applied = True
+                st.session_state.review_phase = "column"
+                st.session_state.qa_ready = False
+                st.session_state.actions = {}
+                st.session_state.comments = {}
+                st.rerun()
+        else:
+            st.success("No rows exceed 30% missing — nothing to delete.")
+            if st.button("Apply row validation (keep all rows)", type="primary"):
+                st.session_state.selected_delete_indices = set()
+                st.session_state.clean_base = filtered_df.drop(columns=pct_cols_all, errors="ignore").copy()
+                st.session_state.rows_applied = True
+                st.session_state.review_phase = "column"
+                st.session_state.qa_ready = False
+                st.session_state.actions = {}
+                st.session_state.comments = {}
+                st.rerun()
+
+        st.divider()
+        if st.button("Back"):
+            go_back()
+        st.stop()
+
+    # ===== PHASE 2: COLUMN (QUESTION) ANALYSIS =====
     clean_base = st.session_state.clean_base.copy()
-    st.info(f"Missing percentages use **{len(clean_base)} cleaned rows**. Choose an action per question, then click "
-            "**Apply actions**. 'Set all to change missing to 0' can be used any time, but you must finish with "
-            "**Apply actions** before you can continue.")
+    n_deleted = len(st.session_state.get("selected_delete_indices") or [])
+    st.success(f"Row validation applied — {len(clean_base)} row(s) kept" + (f", {n_deleted} deleted." if n_deleted else "."))
 
-    action_options = ["change missing to 0", "drop this question"]
-    valid_actions = set(action_options)
+    # Back to row review (with confirmation because it discards the column analysis)
+    if st.session_state.get("confirm_back_row"):
+        st.warning("Going back to row validation will **clear your column analysis** (all actions and comments). Continue?")
+        bc1, bc2 = st.columns(2)
+        with bc1:
+            if st.button("Yes, back to row validation (lose column work)"):
+                st.session_state.review_phase = "row"
+                st.session_state.rows_applied = False
+                st.session_state.qa_ready = False
+                st.session_state.actions = {}
+                st.session_state.comments = {}
+                st.session_state.confirm_back_row = False
+                st.rerun()
+        with bc2:
+            if st.button("Cancel"):
+                st.session_state.confirm_back_row = False
+                st.rerun()
+    else:
+        if st.button("← Back to row validation"):
+            st.session_state.confirm_back_row = True
+            st.rerun()
 
-    base_cols_order = []
-    rows = []
+    st.markdown("#### 2) Column (question) analysis")
+    st.caption("Choose an action per question. Questions with **0% missing** are locked to **no change** "
+               "(comment defaults to 'normal', not required). **change missing to 0** and **drop this question** "
+               "each need a comment.")
+
+    action_options = ["no change", "change missing to 0", "drop this question"]
+
+    qinfo = []
     for base_col in BASELINE_QUESTION_COLS:
         if base_col not in clean_base.columns:
             continue
-        post_col = f"{base_col}_post"
         lab = QUESTION_LABELS.get(base_col, base_col)
         eng = lab.split(" | ", 1)[1].strip() if " | " in lab else str(lab)
-        base_missing = question_missing_pct(clean_base, base_col)
-        end_missing = question_missing_pct(clean_base, post_col)
-        high = base_missing >= 0.30 or end_missing >= 0.30
-        default_action = "drop this question" if high else "change missing to 0"
-        current = st.session_state.actions.get(base_col, default_action)
-        if current not in valid_actions:
-            current = default_action
-        base_cols_order.append(base_col)
-        row = {"Question": f"{base_col} — {eng}", "Pre missing %": round(base_missing * 100, 1)}
-        if st.session_state.get("analysis_mode") != "pre":
-            row["Post missing %"] = round(end_missing * 100, 1)
-        row["Action"] = current
-        rows.append(row)
-    question_review_df = pd.DataFrame(rows)
+        pre_m = question_missing_pct(clean_base, base_col)
+        post_m = None if pre_mode else question_missing_pct(clean_base, f"{base_col}_post")
+        locked = (pre_m == 0) and (pre_mode or post_m == 0)
+        high = (pre_m >= 0.30) or (post_m is not None and post_m >= 0.30)
+        default_action = "no change" if locked else ("drop this question" if high else "change missing to 0")
+        qinfo.append((base_col, eng, pre_m, post_m, locked, default_action))
 
-    with st.form("question_actions_form", clear_on_submit=False):
-        edited_actions = st.data_editor(
-            question_review_df,
-            column_config={
-                "Question": st.column_config.TextColumn("Question", disabled=True, width="large"),
-                "Pre missing %": st.column_config.ProgressColumn("Pre missing %", format="%.1f%%", min_value=0, max_value=100),
-                "Post missing %": st.column_config.ProgressColumn("Post missing %", format="%.1f%%", min_value=0, max_value=100),
-                "Action": st.column_config.SelectboxColumn("Action", options=action_options, required=True, width="medium"),
-            },
-            disabled=["Question", "Pre missing %", "Post missing %"],
-            hide_index=True,
-            use_container_width=True,
-            height=520,
-            key="question_action_editor_form",
-        )
-        fc1, fc2 = st.columns(2)
-        with fc1:
-            set_all_zero = st.form_submit_button("Set all to 'change missing to 0'")
-        with fc2:
-            submitted = st.form_submit_button("Apply actions", type="primary")
+    actions = dict(st.session_state.get("actions") or {})
+    comments = dict(st.session_state.get("comments") or {})
+    for qid, eng, pre_m, post_m, locked, da in qinfo:
+        if locked:
+            actions[qid] = "no change"
+            if not str(comments.get(qid, "")).strip():
+                comments[qid] = "normal"
+        else:
+            actions.setdefault(qid, da)
+            comments.setdefault(qid, "")
+    st.session_state.actions = actions
+    st.session_state.comments = comments
 
-    if set_all_zero:
-        st.session_state.actions = {q: "change missing to 0" for q in base_cols_order}
-        st.session_state.qa_ready = False
-        st.rerun()
+    locked_ids = {t[0] for t in qinfo if t[4]}
+    filt = st.selectbox("Filter questions by action taken",
+                        ["All", "no change", "change missing to 0", "drop this question", "needs a comment"],
+                        key="qa_filter")
 
-    if submitted:
-        acts = list(edited_actions["Action"].values)
-        new_actions = {}
-        for q, a in zip(base_cols_order, acts):
-            new_actions[q] = a if a in valid_actions else "change missing to 0"
-        st.session_state.actions = new_actions
-        st.session_state.qa_ready = True
-        st.rerun()
+    def _match(qid):
+        a = actions.get(qid)
+        if filt == "All":
+            return True
+        if filt == "needs a comment":
+            return (a in ("change missing to 0", "drop this question")) and not str(comments.get(qid, "")).strip()
+        return a == filt
+
+    shown = [t for t in qinfo if _match(t[0])]
+    shown_qids = [t[0] for t in shown]
+
+    rows = []
+    for qid, eng, pre_m, post_m, locked, da in shown:
+        r = {"Question": f"{qid} — {eng}", "Pre missing %": round(pre_m * 100, 1)}
+        if not pre_mode:
+            r["Post missing %"] = round((post_m or 0) * 100, 1)
+        r["Action"] = actions.get(qid, da)
+        r["Comment"] = comments.get(qid, "")
+        rows.append(r)
+    qdf = pd.DataFrame(rows)
+
+    st.caption("Tip: Apply before changing the filter so your edits are saved.")
+    colcfg2 = {
+        "Question": st.column_config.TextColumn("Question", disabled=True, width="large"),
+        "Pre missing %": st.column_config.ProgressColumn("Pre missing %", format="%.1f%%", min_value=0, max_value=100),
+        "Post missing %": st.column_config.ProgressColumn("Post missing %", format="%.1f%%", min_value=0, max_value=100),
+        "Action": st.column_config.SelectboxColumn("Action", options=action_options, required=True, width="medium"),
+        "Comment": st.column_config.TextColumn("Comment (needed for change / drop)", width="large"),
+    }
+    with st.form("qa_form", clear_on_submit=False):
+        if len(qdf):
+            edited = st.data_editor(
+                qdf, column_config=colcfg2,
+                disabled=["Question", "Pre missing %", "Post missing %"],
+                hide_index=True, use_container_width=True, height=460, key="qa_editor")
+        else:
+            edited = qdf
+            st.info("No questions match this filter.")
+        applied = st.form_submit_button("Apply actions", type="primary")
+
+    if applied:
+        if len(edited):
+            for i, qid in enumerate(shown_qids):
+                if qid in locked_ids:
+                    actions[qid] = "no change"
+                    comments[qid] = "normal"
+                else:
+                    actions[qid] = str(edited.iloc[i]["Action"])
+                    comments[qid] = str(edited.iloc[i]["Comment"] or "").strip()
+        st.session_state.actions = actions
+        st.session_state.comments = comments
+        errors = []
+        for qid, eng, pre_m, post_m, locked, da in qinfo:
+            if locked:
+                continue
+            a = actions.get(qid)
+            if a == "no change":
+                errors.append(f"{qid}: has missing data — choose 'change missing to 0' or 'drop this question'.")
+            elif a in ("change missing to 0", "drop this question") and not str(comments.get(qid, "")).strip():
+                errors.append(f"{qid}: a comment is required for '{a}'.")
+        if errors:
+            st.session_state.qa_ready = False
+            st.error(f"Please fix {len(errors)} item(s) before continuing (use the 'needs a comment' filter to find them):")
+            for e in errors[:15]:
+                st.write("• " + e)
+            if len(errors) > 15:
+                st.write(f"… and {len(errors) - 15} more.")
+        else:
+            st.session_state.qa_ready = True
+            st.rerun()
 
     if st.session_state.get("qa_ready"):
-        dropped = [q for q, a in st.session_state.actions.items() if a == "drop this question"]
-        if dropped:
-            st.warning(f"{len(dropped)} question(s) will be dropped from baseline and endline.")
-            drop_df = pd.DataFrame({
-                "Question": [f"{q} — " + QUESTION_LABELS.get(q, q).split(" | ", 1)[-1] for q in dropped],
-            })
-            st.dataframe(drop_df, hide_index=True, use_container_width=True)
-        else:
-            st.success("No questions will be dropped.")
-        cc1, cc2 = st.columns(2)
-        with cc1:
-            if st.button("Back to editing"):
-                st.session_state.qa_ready = False
-                st.rerun()
-        with cc2:
-            if st.button("Confirm and continue to download", type="primary"):
-                st.session_state.qa_ready = False
-                go_next()
-
-    st.divider()
-    if st.button("Back"):
-        go_back()
+        dropped = [q for q, a in actions.items() if a == "drop this question"]
+        zeroed = [q for q, a in actions.items() if a == "change missing to 0"]
+        st.success(f"Actions applied — {len(dropped)} dropped, {len(zeroed)} set to 0, "
+                   f"{len(actions) - len(dropped) - len(zeroed)} no change.")
+        if st.button("Next: Download", type="primary"):
+            go_next()
 
 # STEP 5: Map questions into items (drag and drop)
 elif st.session_state.step == 5:
@@ -2854,8 +2942,8 @@ elif st.session_state.step == 6:
         if st.button("Next: Map items into domains", type="primary"):
             go_next()
 
-# STEP 10: Download
-elif st.session_state.step == 10:
+# STEP 9: Download
+elif st.session_state.step == 9:
     st.subheader("Step 10: Preview and Download")
     clean_base = st.session_state.clean_base.copy()
     actions = st.session_state.actions
