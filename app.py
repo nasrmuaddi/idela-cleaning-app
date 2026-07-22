@@ -1557,16 +1557,26 @@ def write_new_workbook(raw_df, cleaned_df, q_df, i_df, d_df, rq=None, ri=None, r
 
 
 def build_analysis_pdf(clean_df, max_scores, item_mapping, domain_mapping, pre_only):
-    """Multi-page PDF: overall IDELA + domain scores, then a page per demographic breakdown
-    (gender, age group, residency status, governorate, nationality, sector)."""
+    """Designed multi-page PDF. Overall + a page per breakdown (gender, age group, residency,
+    governorate, nationality, sector). Pre-only shows Pre %. Pre+Post shows Pre, then Post, then
+    the Difference (post - pre) for the 4 domains and IDELA."""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     from matplotlib.backends.backend_pdf import PdfPages
+    from matplotlib.patches import Rectangle
     import numpy as np
+    import datetime
 
     domains = list(domain_mapping.keys())
     metrics = domains + ["IDELA"]
+    COLORS = ["#4E6E8E", "#5C8768", "#C7924B", "#8E6E9E", "#B0555A"]
+    INK, MUTED, GRID = "#243b53", "#5b6b7b", "#e6ebf1"
+    SHORT = {"Motor Skills": "Motor", "Early Literacy Skills": "Literacy",
+             "Early Numeracy Skills": "Numeracy", "Social Emotional Skills": "Soc-Emo", "IDELA": "IDELA"}
+
+    def short(m):
+        return SHORT.get(m, str(m))
 
     def summary_for(sub):
         qd = analysis_by_question(sub, max_scores, pre_only=pre_only)
@@ -1584,13 +1594,7 @@ def build_analysis_pdf(clean_df, max_scores, item_mapping, domain_mapping, pre_o
             x = float(v)
         except Exception:
             return "Unknown"
-        if x <= 2:
-            return "0-2"
-        if x <= 6:
-            return "3-6"
-        if x <= 8:
-            return "7-8"
-        return "Other"
+        return "0-2" if x <= 2 else ("3-6" if x <= 6 else ("7-8" if x <= 8 else "Other"))
 
     def firstcol(cands):
         for c in cands:
@@ -1598,79 +1602,139 @@ def build_analysis_pdf(clean_df, max_scores, item_mapping, domain_mapping, pre_o
                 return c
         return None
 
+    def style_ax(ax, title, ylabel, ylim, zero=False):
+        ax.set_title(title, fontsize=11, fontweight="bold", loc="left", color=INK, pad=6)
+        ax.set_ylabel(ylabel, fontsize=8, color=MUTED)
+        if ylim:
+            ax.set_ylim(*ylim)
+        ax.grid(axis="y", color=GRID, linewidth=1)
+        ax.set_axisbelow(True)
+        for sp in ("top", "right"):
+            ax.spines[sp].set_visible(False)
+        for sp in ("left", "bottom"):
+            ax.spines[sp].set_color("#cbd5e0")
+        ax.tick_params(labelsize=7, colors=MUTED)
+        if zero:
+            ax.axhline(0, color="#94a3b8", linewidth=1)
+
+    def grouped(ax, cats, vals):
+        x = np.arange(len(cats))
+        n = len(metrics)
+        w = 0.8 / n
+        for mi, mlab in enumerate(metrics):
+            ax.bar(x + mi * w, vals[mlab], w, color=COLORS[mi], edgecolor="white", linewidth=0.4, label=short(mlab))
+        ax.set_xticks(x + 0.4 - w / 2)
+        ax.set_xticklabels(cats, fontsize=7)
+
+    def style_table(t):
+        for (r, c), cell in t.get_celld().items():
+            cell.set_edgecolor("#e2e8f0")
+            cell.set_linewidth(0.5)
+            if r == 0:
+                cell.set_facecolor("#2F3B52")
+                cell.set_text_props(color="white", fontweight="bold")
+            elif r % 2 == 0:
+                cell.set_facecolor("#f5f7fa")
+
+    def groups_for(series):
+        gg = []
+        for cat, sub in clean_df.groupby(series):
+            if len(sub) == 0:
+                continue
+            ps, qs = summary_for(sub)
+            gg.append((str(cat), len(sub), ps, qs))
+        gg.sort(key=lambda g: g[0])
+        return gg
+
     buf = io.BytesIO()
     with PdfPages(buf) as pdf:
-        # ---- Title / overall ----
+        # ---------- Cover ----------
         fig = plt.figure(figsize=(8.27, 11.69))
-        fig.suptitle("IDELA Analysis Report", fontsize=20, y=0.96)
-        ax = fig.add_subplot(111)
+        fig.patch.set_facecolor("white")
+        ax = fig.add_axes([0, 0, 1, 1])
         ax.axis("off")
-        pre, post = summary_for(clean_df)
-        lines = [f"Total children analysed: {len(clean_df)}",
-                 f"Analysis type: {'Pre only' if pre_only else 'Pre and Post'}", "",
-                 "Overall scores", "----------------"]
-        for mlab in metrics:
+        ax.add_patch(Rectangle((0, 0.83), 1, 0.17, transform=ax.transAxes, color="#2F3B52", zorder=0))
+        ax.text(0.07, 0.905, "IDELA Analysis Report", transform=ax.transAxes, fontsize=25, color="white", fontweight="bold", va="center")
+        pre_all, post_all = summary_for(clean_df)
+        ax.text(0.07, 0.77, "Pre analysis" if pre_only else "Pre and Post analysis", transform=ax.transAxes, fontsize=14, color=INK)
+        ax.text(0.07, 0.74, f"{len(clean_df)} children  \u00b7  generated {datetime.date.today().isoformat()}",
+                transform=ax.transAxes, fontsize=10, color=MUTED)
+        ax.text(0.07, 0.65, "IDELA score", transform=ax.transAxes, fontsize=12, color=MUTED)
+        if pre_only:
+            ax.text(0.07, 0.575, f"{pre_all.get('IDELA', 0):.1f}%", transform=ax.transAxes, fontsize=40, color="#4E6E8E", fontweight="bold")
+        else:
+            dlt = post_all.get("IDELA", 0) - pre_all.get("IDELA", 0)
+            ax.text(0.07, 0.585, f"{pre_all.get('IDELA', 0):.1f}%  \u2192  {post_all.get('IDELA', 0):.1f}%",
+                    transform=ax.transAxes, fontsize=27, color="#4E6E8E", fontweight="bold")
+            ax.text(0.07, 0.535, f"change {dlt:+.1f} points", transform=ax.transAxes, fontsize=12,
+                    color=("#2e7d32" if dlt >= 0 else "#c62828"))
+        ax.text(0.07, 0.44, "Domains", transform=ax.transAxes, fontsize=12, color=MUTED)
+        for i, dom in enumerate(domains):
             if pre_only:
-                lines.append(f"{mlab:<28} {pre.get(mlab, 0):6.1f}%")
+                txt = f"{short(dom):<10} {pre_all.get(dom, 0):5.1f}%"
             else:
-                dlt = post.get(mlab, 0) - pre.get(mlab, 0)
-                lines.append(f"{mlab:<22} pre {pre.get(mlab,0):5.1f}%  post {post.get(mlab,0):5.1f}%  ({dlt:+.1f})")
-        ax.text(0.06, 0.88, "\n".join(lines), va="top", ha="left", fontsize=11, family="monospace")
+                txt = f"{short(dom):<10} {pre_all.get(dom, 0):5.1f}%  \u2192 {post_all.get(dom, 0):5.1f}%"
+            ax.text(0.07, 0.40 - i * 0.035, txt, transform=ax.transAxes, fontsize=11, color=INK, family="monospace")
         pdf.savefig(fig)
         plt.close(fig)
 
-        dims = [
-            ("Gender", "e_childs_sex", None),
-            ("Age group", "f_childs_age", "age"),
-            ("Residency status", firstcol(["residency_status", "residency", "refugee_status", "status"]), None),
-            ("Governorate", firstcol(["governorate", "governerate", "gov"]), None),
-            ("Nationality", firstcol(["nationality", "nationalities"]), None),
-            ("Sector", firstcol(["sector", "sectors"]), None),
-        ]
+        dims = [("Overall", None, "overall"),
+                ("Gender", "e_childs_sex", None),
+                ("Age group", "f_childs_age", "age"),
+                ("Residency status", firstcol(["residency_status", "residency", "refugee_status", "status"]), None),
+                ("Governorate", firstcol(["governorate", "governerate", "gov"]), None),
+                ("Nationality", firstcol(["nationality", "nationalities"]), None),
+                ("Sector", firstcol(["sector", "sectors"]), None)]
         for label, col, kind in dims:
-            if not col or col not in clean_df.columns:
-                continue
-            if kind == "age":
-                cats = clean_df[col].map(age_cat)
-            else:
-                cats = clean_df[col].astype("string").fillna("Unknown").replace("", "Unknown")
-            groups = []
-            for cat, sub in clean_df.groupby(cats):
-                if len(sub) == 0:
+            if kind == "overall":
+                series = pd.Series(["All children"] * len(clean_df), index=clean_df.index)
+            elif kind == "age":
+                if "f_childs_age" not in clean_df.columns:
                     continue
-                pre_s, post_s = summary_for(sub)
-                groups.append((str(cat), len(sub), pre_s, post_s))
+                series = clean_df[col].map(age_cat)
+            else:
+                if not col or col not in clean_df.columns:
+                    continue
+                series = clean_df[col].astype("string").fillna("Unknown").replace("", "Unknown")
+            groups = groups_for(series)
             if not groups:
                 continue
-            groups.sort(key=lambda g: g[0])
+            catlabels = [f"{g[0]}\n(n={g[1]})" for g in groups]
+            pre_vals = {m: [g[2].get(m, 0) for g in groups] for m in metrics}
 
             fig = plt.figure(figsize=(8.27, 11.69))
-            fig.suptitle(f"By {label}", fontsize=16, y=0.97)
-            ax1 = fig.add_axes([0.10, 0.56, 0.85, 0.33])
-            x = np.arange(len(groups))
-            w = 0.8 / max(1, len(metrics))
-            for mi, mlab in enumerate(metrics):
-                ax1.bar(x + mi * w, [g[2].get(mlab, 0) for g in groups], w, label=mlab)
-            ax1.set_xticks(x + 0.4 - w / 2)
-            ax1.set_xticklabels([f"{g[0]}\n(n={g[1]})" for g in groups], fontsize=8)
-            ax1.set_ylabel("Pre %")
-            ax1.set_ylim(0, 100)
-            ax1.set_title("Pre % by " + label, fontsize=10)
-            ax1.legend(fontsize=7, ncol=len(metrics), loc="upper center", bbox_to_anchor=(0.5, -0.14))
-
-            ax2 = fig.add_axes([0.04, 0.05, 0.92, 0.42])
-            ax2.axis("off")
-            col_labels = ["Category", "n"] + metrics + ([f"{mm} post" for mm in metrics] if not pre_only else [])
-            table_rows = []
-            for cat, n, pre_s, post_s in groups:
-                row = [cat, str(n)] + [f"{pre_s.get(mm, 0):.1f}" for mm in metrics]
-                if not pre_only:
-                    row += [f"{post_s.get(mm, 0):.1f}" for mm in metrics]
-                table_rows.append(row)
-            tbl = ax2.table(cellText=table_rows, colLabels=col_labels, loc="upper center", cellLoc="center")
-            tbl.auto_set_font_size(False)
-            tbl.set_fontsize(6)
-            tbl.scale(1, 1.3)
+            fig.patch.set_facecolor("white")
+            fig.text(0.09, 0.955, f"By {label}", fontsize=16, fontweight="bold", color=INK)
+            fig.add_artist(plt.Line2D([0.09, 0.95], [0.945, 0.945], color="#2F3B52", linewidth=2, transform=fig.transFigure))
+            if pre_only:
+                ax1 = fig.add_axes([0.10, 0.55, 0.85, 0.32])
+                grouped(ax1, catlabels, pre_vals)
+                style_ax(ax1, "Pre %", "%", (0, 100))
+                h, l = ax1.get_legend_handles_labels()
+                fig.legend(h, l, loc="lower center", ncol=5, fontsize=8, frameon=False, bbox_to_anchor=(0.5, 0.49))
+                axt = fig.add_axes([0.05, 0.06, 0.9, 0.36])
+                axt.axis("off")
+                rowsT = [[g[0], str(g[1])] + [f"{g[2].get(m, 0):.1f}" for m in metrics] for g in groups]
+                t = axt.table(cellText=rowsT, colLabels=["Category", "n"] + [short(m) for m in metrics],
+                              loc="upper center", cellLoc="center")
+                t.auto_set_font_size(False)
+                t.set_fontsize(7)
+                t.scale(1, 1.4)
+                style_table(t)
+            else:
+                post_vals = {m: [g[3].get(m, 0) for g in groups] for m in metrics}
+                diff_vals = {m: [g[3].get(m, 0) - g[2].get(m, 0) for g in groups] for m in metrics}
+                ax1 = fig.add_axes([0.10, 0.68, 0.85, 0.19])
+                grouped(ax1, catlabels, pre_vals)
+                style_ax(ax1, "1. Pre %", "%", (0, 100))
+                ax2 = fig.add_axes([0.10, 0.41, 0.85, 0.19])
+                grouped(ax2, catlabels, post_vals)
+                style_ax(ax2, "2. Post %", "%", (0, 100))
+                ax3 = fig.add_axes([0.10, 0.14, 0.85, 0.19])
+                grouped(ax3, catlabels, diff_vals)
+                style_ax(ax3, "3. Difference (post - pre)", "points", None, zero=True)
+                h, l = ax1.get_legend_handles_labels()
+                fig.legend(h, l, loc="lower center", ncol=5, fontsize=8, frameon=False, bbox_to_anchor=(0.5, 0.055))
             pdf.savefig(fig)
             plt.close(fig)
     return buf.getvalue()
@@ -2065,7 +2129,7 @@ def save_resume_bytes():
     return gzip.compress(json.dumps(payload).encode("utf-8"))
 
 
-def load_resume(file):
+def load_resume(file, expected_mode=None):
     import json, gzip
     ss = st.session_state
     raw = file.read() if hasattr(file, "read") else file
@@ -2073,7 +2137,14 @@ def load_resume(file):
         payload = json.loads(gzip.decompress(raw).decode("utf-8"))
     except Exception:
         raise ValueError("This is not a valid IDELA resume file.")
-    ss["analysis_mode"] = payload.get("analysis_mode")
+    file_mode = payload.get("analysis_mode")
+    if expected_mode is not None and file_mode != expected_mode:
+        nice = {"pre": "Pre analysis", "prepost": "Post and Pre analysis"}
+        raise ValueError(
+            f"This resume file was saved for a {nice.get(file_mode, file_mode)}, but you chose to continue a "
+            f"{nice.get(expected_mode, expected_mode)}. This file might be for the other analysis type — "
+            f"pick the matching Continue option.")
+    ss["analysis_mode"] = file_mode
     ss["review_phase"] = payload.get("review_phase", "row")
     ss["item_mapping"] = {str(k): v for k, v in (payload.get("item_mapping") or {}).items()}
     ss["domain_mapping"] = {k: list(v) for k, v in (payload.get("domain_mapping") or {}).items()}
@@ -2117,15 +2188,16 @@ if st.session_state.get("analysis_mode") is None:
                 st.session_state.step = 1
                 st.rerun()
         else:
-            st.caption("Upload the check-later file you saved earlier to continue exactly where you left off.")
+            _target = "pre" if choice.startswith("2") else "prepost"
+            st.caption("Upload the resume file you saved earlier to continue exactly where you left off.")
             up = st.file_uploader("Upload your resume file (.idela)", type=["idela"], key="ckpt_up")
             if up is not None:
                 try:
-                    load_resume(up)
+                    load_resume(up, expected_mode=_target)
                     st.success("Session restored. Continuing where you left off.")
                     st.rerun()
                 except Exception as e:
-                    st.error(f"Could not read this file: {e}")
+                    st.error(str(e))
     st.stop()
 
 render_sidebar()
@@ -2741,11 +2813,9 @@ elif st.session_state.step == 8:
             st.rerun()
 
     st.markdown("#### 2) Review questions across all children (by column)")
-    st.caption("Choose an action per question. Questions with **0% missing** are locked to **no change** "
-               "(comment defaults to 'normal', not required). **change missing to 0** and **drop this question** "
-               "each need a comment.")
-
-    action_options = ["no change", "change missing to 0", "drop this question"]
+    st.caption("Questions with **0% missing** are kept as **no change** automatically. Any question that has "
+               "missing values (pre or post) must be **change missing to 0** or **drop this question**, and each "
+               "of those needs a comment.")
 
     qinfo = []
     for base_col in BASELINE_QUESTION_COLS:
@@ -2757,7 +2827,7 @@ elif st.session_state.step == 8:
         post_m = None if pre_mode else question_missing_pct(clean_base, f"{base_col}_post")
         locked = (pre_m == 0) and (pre_mode or post_m == 0)
         high = (pre_m >= 0.30) or (post_m is not None and post_m >= 0.30)
-        default_action = "no change" if locked else ("drop this question" if high else "change missing to 0")
+        default_action = "drop this question" if high else "change missing to 0"
         qinfo.append((base_col, eng, pre_m, post_m, locked, default_action))
 
     actions = dict(st.session_state.get("actions") or {})
@@ -2765,95 +2835,101 @@ elif st.session_state.step == 8:
     for qid, eng, pre_m, post_m, locked, da in qinfo:
         if locked:
             actions[qid] = "no change"
-            if not str(comments.get(qid, "")).strip():
-                comments[qid] = "normal"
+            comments[qid] = "normal"
         else:
-            actions.setdefault(qid, da)
+            if actions.get(qid) not in ("change missing to 0", "drop this question"):
+                actions[qid] = da
             comments.setdefault(qid, "")
     st.session_state.actions = actions
     st.session_state.comments = comments
 
-    locked_ids = {t[0] for t in qinfo if t[4]}
-    filt = st.selectbox("Filter questions by action taken",
-                        ["All", "no change", "change missing to 0", "drop this question", "needs a comment"],
-                        key="qa_filter")
+    locked_q = [t for t in qinfo if t[4]]
+    editable_q = [t for t in qinfo if not t[4]]
 
-    def _match(qid):
-        a = actions.get(qid)
-        if filt == "All":
-            return True
-        if filt == "needs a comment":
-            return (a in ("change missing to 0", "drop this question")) and not str(comments.get(qid, "")).strip()
-        return a == filt
+    if locked_q:
+        with st.expander(f"{len(locked_q)} question(s) with no missing data — kept as 'no change'"):
+            ldf = pd.DataFrame([{"Question": f"{q} — {eng}", "Action": "no change", "Comment": "normal"}
+                                for q, eng, pm, qm, lk, da in locked_q])
+            st.dataframe(ldf, hide_index=True, use_container_width=True)
 
-    shown = [t for t in qinfo if _match(t[0])]
-    shown_qids = [t[0] for t in shown]
+    action_options = ["change missing to 0", "drop this question"]
 
-    rows = []
-    for qid, eng, pre_m, post_m, locked, da in shown:
-        r = {"Question": f"{qid} — {eng}", "Pre missing %": round(pre_m * 100, 1)}
-        if not pre_mode:
-            r["Post missing %"] = round((post_m or 0) * 100, 1)
-        r["Action"] = actions.get(qid, da)
-        r["Comment"] = comments.get(qid, "")
-        rows.append(r)
-    qdf = pd.DataFrame(rows)
+    if not editable_q:
+        st.success("No question has missing values — nothing to action.")
+        st.session_state.qa_ready = True
+    else:
+        filt = st.selectbox("Filter questions by action taken",
+                            ["All", "change missing to 0", "drop this question", "needs a comment"],
+                            key="qa_filter")
 
-    st.caption("Tip: Apply before changing the filter so your edits are saved.")
-    colcfg2 = {
-        "Question": st.column_config.TextColumn("Question", disabled=True, width="large"),
-        "Pre missing %": st.column_config.ProgressColumn("Pre missing %", format="%.1f%%", min_value=0, max_value=100),
-        "Post missing %": st.column_config.ProgressColumn("Post missing %", format="%.1f%%", min_value=0, max_value=100),
-        "Action": st.column_config.SelectboxColumn("Action", options=action_options, required=True, width="medium"),
-        "Comment": st.column_config.TextColumn("Comment (needed for change / drop)", width="large"),
-    }
-    with st.form("qa_form", clear_on_submit=False):
-        if len(qdf):
-            edited = st.data_editor(
-                qdf, column_config=colcfg2,
-                disabled=["Question", "Pre missing %", "Post missing %"],
-                hide_index=True, use_container_width=True, height=460, key="qa_editor")
-        else:
-            edited = qdf
-            st.info("No questions match this filter.")
-        applied = st.form_submit_button("Apply actions", type="primary")
-
-    if applied:
-        if len(edited):
-            for i, qid in enumerate(shown_qids):
-                if qid in locked_ids:
-                    actions[qid] = "no change"
-                    comments[qid] = "normal"
-                else:
-                    actions[qid] = str(edited.iloc[i]["Action"])
-                    comments[qid] = str(edited.iloc[i]["Comment"] or "").strip()
-        st.session_state.actions = actions
-        st.session_state.comments = comments
-        errors = []
-        for qid, eng, pre_m, post_m, locked, da in qinfo:
-            if locked:
-                continue
+        def _match(qid):
             a = actions.get(qid)
-            if a == "no change":
-                errors.append(f"{qid}: has missing data — choose 'change missing to 0' or 'drop this question'.")
-            elif a in ("change missing to 0", "drop this question") and not str(comments.get(qid, "")).strip():
-                errors.append(f"{qid}: a comment is required for '{a}'.")
-        if errors:
-            st.session_state.qa_ready = False
-            st.error(f"Please fix {len(errors)} item(s) before continuing (use the 'needs a comment' filter to find them):")
-            for e in errors[:15]:
-                st.write("• " + e)
-            if len(errors) > 15:
-                st.write(f"… and {len(errors) - 15} more.")
-        else:
-            st.session_state.qa_ready = True
-            st.rerun()
+            if filt == "All":
+                return True
+            if filt == "needs a comment":
+                return (a in action_options) and not str(comments.get(qid, "")).strip()
+            return a == filt
+
+        shown = [t for t in editable_q if _match(t[0])]
+        shown_qids = [t[0] for t in shown]
+
+        rows = []
+        for qid, eng, pre_m, post_m, locked, da in shown:
+            r = {"Question": f"{qid} — {eng}", "Pre missing %": round(pre_m * 100, 1)}
+            if not pre_mode:
+                r["Post missing %"] = round((post_m or 0) * 100, 1)
+            r["Action"] = actions.get(qid, da)
+            r["Comment"] = comments.get(qid, "")
+            rows.append(r)
+        qdf = pd.DataFrame(rows)
+
+        st.caption("Tip: Apply before changing the filter so your edits are saved.")
+        colcfg2 = {
+            "Question": st.column_config.TextColumn("Question", disabled=True, width="large"),
+            "Pre missing %": st.column_config.ProgressColumn("Pre missing %", format="%.1f%%", min_value=0, max_value=100),
+            "Post missing %": st.column_config.ProgressColumn("Post missing %", format="%.1f%%", min_value=0, max_value=100),
+            "Action": st.column_config.SelectboxColumn("Action", options=action_options, required=True, width="medium"),
+            "Comment": st.column_config.TextColumn("Comment (required)", width="large"),
+        }
+        with st.form("qa_form", clear_on_submit=False):
+            if len(qdf):
+                edited = st.data_editor(
+                    qdf, column_config=colcfg2,
+                    disabled=["Question", "Pre missing %", "Post missing %"],
+                    hide_index=True, use_container_width=True, height=460, key="qa_editor")
+            else:
+                edited = qdf
+                st.info("No questions match this filter.")
+            applied = st.form_submit_button("Apply actions", type="primary")
+
+        if applied:
+            if len(edited):
+                for i, qid in enumerate(shown_qids):
+                    a = str(edited.iloc[i]["Action"])
+                    actions[qid] = a if a in action_options else "change missing to 0"
+                    comments[qid] = str(edited.iloc[i]["Comment"] or "").strip()
+            st.session_state.actions = actions
+            st.session_state.comments = comments
+            errors = []
+            for qid, eng, pre_m, post_m, locked, da in editable_q:
+                if not str(comments.get(qid, "")).strip():
+                    errors.append(f"{qid}: a comment is required for '{actions.get(qid)}'.")
+            if errors:
+                st.session_state.qa_ready = False
+                st.error(f"Please add a comment for {len(errors)} question(s) (use the 'needs a comment' filter to find them):")
+                for e in errors[:15]:
+                    st.write("• " + e)
+                if len(errors) > 15:
+                    st.write(f"… and {len(errors) - 15} more.")
+            else:
+                st.session_state.qa_ready = True
+                st.rerun()
 
     if st.session_state.get("qa_ready"):
         dropped = [q for q, a in actions.items() if a == "drop this question"]
         zeroed = [q for q, a in actions.items() if a == "change missing to 0"]
-        st.success(f"Actions applied — {len(dropped)} dropped, {len(zeroed)} set to 0, "
-                   f"{len(actions) - len(dropped) - len(zeroed)} no change.")
+        nochange = len(actions) - len(dropped) - len(zeroed)
+        st.success(f"Actions applied — {len(dropped)} dropped, {len(zeroed)} set to 0, {nochange} no change.")
         if st.button("Next: Download", type="primary"):
             go_next()
 
