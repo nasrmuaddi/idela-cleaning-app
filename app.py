@@ -1622,7 +1622,13 @@ def build_analysis_pdf(clean_df, max_scores, item_mapping, domain_mapping, pre_o
         n = len(metrics)
         w = 0.8 / n
         for mi, mlab in enumerate(metrics):
-            ax.bar(x + mi * w, vals[mlab], w, color=COLORS[mi], edgecolor="white", linewidth=0.4, label=short(mlab))
+            xs = x + mi * w
+            ax.bar(xs, vals[mlab], w, color=COLORS[mi], edgecolor="white", linewidth=0.4, label=short(mlab))
+            for xi, v in zip(xs, vals[mlab]):
+                ax.annotate(f"{v:.0f}", (xi, v), ha="center",
+                            va="bottom" if v >= 0 else "top",
+                            fontsize=5, color=INK, xytext=(0, 1 if v >= 0 else -1),
+                            textcoords="offset points")
         ax.set_xticks(x + 0.4 - w / 2)
         ax.set_xticklabels(cats, fontsize=7)
 
@@ -2652,6 +2658,9 @@ elif st.session_state.step == 8:
         st.session_state.rows_applied = False
         st.session_state.qa_ready = False
         st.session_state.confirm_back_row = False
+        st.session_state.selected_delete_indices = set()
+        st.session_state["rows_editor_ver"] = 0
+        st.session_state["deleted_caseids"] = []
     # Mark that we're on step 8 now, so phase transitions (Apply) and other reruns within this
     # step don't re-trigger the fresh-arrival reset (the row/pause phases st.stop() before the
     # end-of-file marker would otherwise run).
@@ -2734,10 +2743,12 @@ elif st.session_state.step == 8:
             with b1:
                 if st.button("Select all high-missing rows"):
                     st.session_state.selected_delete_indices = set(high.index)
+                    st.session_state["rows_editor_ver"] = st.session_state.get("rows_editor_ver", 0) + 1
                     st.rerun()
             with b2:
                 if st.button("Clear selection"):
                     st.session_state.selected_delete_indices = set()
+                    st.session_state["rows_editor_ver"] = st.session_state.get("rows_editor_ver", 0) + 1
                     st.rerun()
             disp_cols = [c for c in ["caseid", "d_childs_full_name", "e_childs_sex", "f_childs_age"] if c in high.columns]
             show = high.copy()
@@ -2751,16 +2762,21 @@ elif st.session_state.step == 8:
             }
             if not pre_mode:
                 colcfg["post missing %"] = st.column_config.ProgressColumn("Post missing %", format="%.1f%%", min_value=0, max_value=100)
-            st.caption("Tick the rows to delete, then click **Apply row validation**. Ticking inside the table does not refresh the page.")
+            st.caption("Nothing is selected by default — tick the rows **you** want to delete (or use the button above), then click **Apply row validation**. Ticking inside the table does not refresh the page.")
             with st.form("rows_form", clear_on_submit=False):
                 edited_rows = st.data_editor(
                     show[editor_cols], use_container_width=True, hide_index=True, height=360,
-                    column_config=colcfg, disabled=disp_cols + pct_cols_all, key="rows_editor_form")
+                    column_config=colcfg, disabled=disp_cols + pct_cols_all,
+                    key=f"rows_editor_form_{st.session_state.get('rows_editor_ver', 0)}")
                 applied_rows = st.form_submit_button("Apply row validation", type="primary")
             if applied_rows:
                 mask = list(edited_rows["Delete?"].values)
                 st.session_state.selected_delete_indices = set(high.index[mask])
                 delete_indices = [i for i in st.session_state.selected_delete_indices if i in filtered_df.index]
+                if "caseid" in filtered_df.columns and delete_indices:
+                    st.session_state["deleted_caseids"] = [str(v) for v in filtered_df.loc[delete_indices, "caseid"].tolist()]
+                else:
+                    st.session_state["deleted_caseids"] = [str(i) for i in delete_indices]
                 st.session_state.clean_base = filtered_df.drop(index=delete_indices).drop(columns=pct_cols_all, errors="ignore").copy()
                 st.session_state.rows_applied = True
                 st.session_state.review_phase = "column"
@@ -2772,6 +2788,7 @@ elif st.session_state.step == 8:
             st.success("No rows exceed 30% missing — nothing to delete.")
             if st.button("Apply row validation (keep all rows)", type="primary"):
                 st.session_state.selected_delete_indices = set()
+                st.session_state["deleted_caseids"] = []
                 st.session_state.clean_base = filtered_df.drop(columns=pct_cols_all, errors="ignore").copy()
                 st.session_state.rows_applied = True
                 st.session_state.review_phase = "column"
@@ -2787,8 +2804,12 @@ elif st.session_state.step == 8:
 
     # ===== PHASE 2: COLUMN (QUESTION) ANALYSIS =====
     clean_base = st.session_state.clean_base.copy()
-    n_deleted = len(st.session_state.get("selected_delete_indices") or [])
-    st.success(f"Row validation applied — {len(clean_base)} row(s) kept" + (f", {n_deleted} deleted." if n_deleted else "."))
+    dc = st.session_state.get("deleted_caseids") or []
+    if dc:
+        shown = ", ".join(dc[:20]) + (f" … (+{len(dc) - 20} more)" if len(dc) > 20 else "")
+        st.success(f"Row validation applied — {len(clean_base)} row(s) kept, {len(dc)} deleted: {shown}")
+    else:
+        st.success(f"Row validation applied — {len(clean_base)} row(s) kept, none deleted.")
 
     # Back to row review (with confirmation because it discards the column analysis)
     if st.session_state.get("confirm_back_row"):
