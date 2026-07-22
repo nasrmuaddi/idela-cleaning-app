@@ -2580,6 +2580,10 @@ elif st.session_state.step == 8:
         st.session_state.rows_applied = False
         st.session_state.qa_ready = False
         st.session_state.confirm_back_row = False
+    # Mark that we're on step 8 now, so phase transitions (Apply) and other reruns within this
+    # step don't re-trigger the fresh-arrival reset (the row/pause phases st.stop() before the
+    # end-of-file marker would otherwise run).
+    st.session_state["_last_step"] = 8
 
     review_choice = st.radio(
         "What would you like to do?",
@@ -2615,16 +2619,16 @@ elif st.session_state.step == 8:
                 qrows.append(r)
             st.markdown("**Questions (columns) — missing %**")
             st.dataframe(pd.DataFrame(qrows), hide_index=True, use_container_width=True, height=240)
-        dlc1, dlc2 = st.columns(2)
-        with dlc1:
-            st.download_button("1) Download quality-check Excel", data=save_quality_check_xlsx(),
-                               file_name="idela_quality_check.xlsx",
-                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-            st.caption("Give this to the field team — they review each row and question's missing % here.")
-        with dlc2:
-            st.download_button("2) Download resume file (do not edit)", data=save_resume_bytes(),
-                               file_name="idela_resume.idela", mime="application/octet-stream", type="primary")
-            st.caption("Keep this safe. Re-upload it under a Continue mode to pick up exactly here.")
+        import zipfile
+        _zip = io.BytesIO()
+        with zipfile.ZipFile(_zip, "w", zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr("idela_quality_check.xlsx", save_quality_check_xlsx())
+            zf.writestr("idela_resume.idela", save_resume_bytes())
+        st.download_button("Download check-later files (.zip)", data=_zip.getvalue(),
+                           file_name="idela_checklater.zip", mime="application/zip", type="primary")
+        st.caption("One download, two files inside: **idela_quality_check.xlsx** (editable — the field team's "
+                   "data-quality checks) and **idela_resume.idela** (do not edit — re-upload it under a Continue "
+                   "mode to resume exactly here).")
         if st.button("Back"):
             go_back()
         st.stop()
