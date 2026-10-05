@@ -912,7 +912,10 @@ def analysis_by_item(clean_df, item_mapping=None, max_scores=None, pre_only=Fals
     return pd.DataFrame(rows)
 
 
-def analysis_by_domain(question_analysis_df, item_mapping=None, domain_mapping=None, pre_only=False):
+def analysis_by_domain(item_analysis_df, item_mapping=None, domain_mapping=None, pre_only=False):
+    """Domain % = average of its ITEM %s (each item weighted equally). Item % comes from
+    analysis_by_item (item points / item max). IDELA = average of the domain %s. This is the
+    standard IDELA two-level method and keeps Item Analysis and Domain Analysis consistent."""
     if item_mapping is None:
         item_mapping = ITEM_MAPPING
     if domain_mapping is None:
@@ -921,31 +924,28 @@ def analysis_by_domain(question_analysis_df, item_mapping=None, domain_mapping=N
     for d, items in domain_mapping.items():
         for it in items:
             item_to_domain[it] = d
-    q_to_domain = {}
-    for q, it in item_mapping.items():
-        d = item_to_domain.get(it)
-        if d:
-            q_to_domain[q] = d
-    qa = question_analysis_df.set_index("Question ID") if len(question_analysis_df) else question_analysis_df
+    ia = item_analysis_df
+    has = "Item ID" in getattr(ia, "columns", [])
+    ia_idx = ia.set_index("Item ID") if (has and len(ia)) else None
     rows = []
     pre_vals, post_vals = [], []
     for d in domain_mapping.keys():
-        qids = [q for q, dd in q_to_domain.items() if dd == d and len(qa) and q in qa.index]
-        pre_pct = float(qa.loc[qids, "Pre %"].mean()) if qids else 0.0
+        its = [it for it in domain_mapping[d] if ia_idx is not None and it in ia_idx.index]
+        pre_pct = float(ia_idx.loc[its, "Pre %"].mean()) if its else 0.0
         pre_vals.append(pre_pct)
         if pre_only:
-            rows.append({"Domain": d, "Questions": len(qids), "Pre %": round(pre_pct, 1)})
+            rows.append({"Domain": d, "Items": len(its), "Pre %": round(pre_pct, 1)})
         else:
-            post_pct = float(qa.loc[qids, "Post %"].mean()) if qids else 0.0
+            post_pct = float(ia_idx.loc[its, "Post %"].mean()) if its else 0.0
             post_vals.append(post_pct)
-            rows.append({"Domain": d, "Questions": len(qids), "Pre %": round(pre_pct, 1),
+            rows.append({"Domain": d, "Items": len(its), "Pre %": round(pre_pct, 1),
                          "Post %": round(post_pct, 1), "Post - Pre %": round(post_pct - pre_pct, 1)})
     idela_pre = sum(pre_vals) / len(pre_vals) if pre_vals else 0.0
     if pre_only:
-        rows.append({"Domain": "IDELA SCORE (average of domains)", "Questions": "", "Pre %": round(idela_pre, 1)})
+        rows.append({"Domain": "IDELA SCORE (average of domains)", "Items": "", "Pre %": round(idela_pre, 1)})
     else:
         idela_post = sum(post_vals) / len(post_vals) if post_vals else 0.0
-        rows.append({"Domain": "IDELA SCORE (average of domains)", "Questions": "",
+        rows.append({"Domain": "IDELA SCORE (average of domains)", "Items": "",
                      "Pre %": round(idela_pre, 1), "Post %": round(idela_post, 1),
                      "Post - Pre %": round(idela_post - idela_pre, 1)})
     return pd.DataFrame(rows)
@@ -1264,24 +1264,34 @@ def rowlevel_domains(clean_df, item_mapping=None, domain_mapping=None, max_score
     for d, items in domain_mapping.items():
         for it in items:
             item_to_domain[it] = d
-    pre_lists = {d: [] for d in domain_mapping}
-    post_lists = {d: [] for d in domain_mapping}
+    # Per-child ITEM %s: (sum of the item's question points) / (sum of the item's max points) * 100
+    item_qs = {}
     for q, it in item_mapping.items():
-        d = item_to_domain.get(it)
-        if d is None or q not in clean_df.columns:
+        if it in item_to_domain and q in clean_df.columns:
+            item_qs.setdefault(it, []).append(q)
+    item_pre, item_post = {}, {}
+    for it, qs in item_qs.items():
+        item_max = sum(question_max_score(q, max_scores) for q in qs)
+        if not item_max:
             continue
-        mx = question_max_score(q, max_scores)
-        pre_lists[d].append(pd.to_numeric(clean_df[q], errors="coerce").fillna(0) / mx * 100)
-        if not pre_only and f"{q}_post" in clean_df.columns:
-            post_lists[d].append(pd.to_numeric(clean_df[f"{q}_post"], errors="coerce").fillna(0) / mx * 100)
+        pre_sum = sum(pd.to_numeric(clean_df[q], errors="coerce").fillna(0) for q in qs)
+        item_pre[it] = pre_sum / item_max * 100
+        if not pre_only:
+            post_qs = [q for q in qs if f"{q}_post" in clean_df.columns]
+            post_max = sum(question_max_score(q, max_scores) for q in post_qs)
+            if post_max:
+                post_sum = sum(pd.to_numeric(clean_df[f"{q}_post"], errors="coerce").fillna(0) for q in post_qs)
+                item_post[it] = post_sum / post_max * 100
     vdf = pd.DataFrame(index=clean_df.index)
     dom_pre, dom_post = {}, {}
     for d in domain_mapping:
-        pre = sum(pre_lists[d]) / len(pre_lists[d]) if pre_lists[d] else pd.Series(0.0, index=clean_df.index)
+        pre_its = [it for it in domain_mapping[d] if it in item_pre]
+        pre = sum(item_pre[it] for it in pre_its) / len(pre_its) if pre_its else pd.Series(0.0, index=clean_df.index)
         dom_pre[d] = pre
         vdf[f"{d} - pre %"] = pre.round(1)
         if not pre_only:
-            post = sum(post_lists[d]) / len(post_lists[d]) if post_lists[d] else pd.Series(0.0, index=clean_df.index)
+            post_its = [it for it in domain_mapping[d] if it in item_post]
+            post = sum(item_post[it] for it in post_its) / len(post_its) if post_its else pd.Series(0.0, index=clean_df.index)
             dom_post[d] = post
             vdf[f"{d} - post %"] = post.round(1)
     if dom_pre:
@@ -1579,8 +1589,8 @@ def build_analysis_pdf(clean_df, max_scores, item_mapping, domain_mapping, pre_o
         return SHORT.get(m, str(m))
 
     def summary_for(sub):
-        qd = analysis_by_question(sub, max_scores, pre_only=pre_only)
-        dd = analysis_by_domain(qd, item_mapping, domain_mapping, pre_only=pre_only)
+        idf = analysis_by_item(sub, item_mapping, max_scores, pre_only=pre_only)
+        dd = analysis_by_domain(idf, item_mapping, domain_mapping, pre_only=pre_only)
         pre, post = {}, {}
         for _, r in dd.iterrows():
             name = "IDELA" if str(r["Domain"]).startswith("IDELA") else r["Domain"]
@@ -3184,7 +3194,7 @@ elif st.session_state.step == 9:
     pre_only = st.session_state.get("analysis_mode") == "pre"
     q_df = analysis_by_question(clean_df, max_scores, pre_only=pre_only)
     i_df = analysis_by_item(clean_df, item_mapping, max_scores, pre_only=pre_only)
-    d_df = analysis_by_domain(q_df, item_mapping, domain_mapping, pre_only=pre_only)
+    d_df = analysis_by_domain(i_df, item_mapping, domain_mapping, pre_only=pre_only)
     cleaned_sheet = build_cleaned_data_sheet(clean_df, max_scores, pre_only=pre_only)
 
     st.write("Question analysis preview")
